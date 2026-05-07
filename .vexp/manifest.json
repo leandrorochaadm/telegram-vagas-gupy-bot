@@ -1,0 +1,14 @@
+{
+  "file_hashes": {
+    "main.py": "2960c26ae9131874a543a00a951e468629c485fb685ffb479c1419a51a8c0260"
+  },
+  "indexed_at_commit": "c7836038a13ac576dfb5133df2ec784db6ccae10",
+  "indexed_at_timestamp": "2026-05-06T21:09:46.657783+00:00",
+  "schema_version": 3,
+  "stats": {
+    "total_edges": 19,
+    "total_files": 1,
+    "total_nodes": 13
+  },
+  "vexp_version": "2.0.12"
+}
