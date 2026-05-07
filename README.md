@@ -24,15 +24,17 @@ Partindo dessa base, evoluí o projeto para atender minha própria realidade com
 | 🟣 **Gupy** | API JSON | SP + Remoto |
 | 🔷 **LinkedIn** | API Guest | SP + Remoto |
 | 🟤 **ProgramaThor** | Web Scraping | SP + Remoto |
+| 🟢 **Solides** | API JSON | Remoto |
+| 🟡 **InHire** | Web Scraping | Remoto |
 
 ### 🎯 Filtros inteligentes baseados em perfil
 - **Senioridade:** o bot agora busca todas as senioridades, focado no nível Sênior (o antigo bloqueio foi removido).
-- **Gaps eliminatórios:** bloqueia vagas com PHP, Python, Node.js, React Native, KMP, modelo presencial, exigência de inglês fluente/avançado, entre outros.
+- **Gaps eliminatórios:** bloqueia vagas com PHP, Python, Node.js, React Native, KMP, modelo presencial, Fullstack, Swift, Kotlin, UX, exigência de inglês fluente/avançado, entre outros.
 - **Vagas recentes:** limita a vagas publicadas nos últimos 3 dias
 - **Deduplicação dupla:** por URL (banco SQLite) + por título/empresa na sessão
 
 ### 📊 Score de match por vaga
-Cada alerta chega com um indicador de compatibilidade baseado no stack técnico detectado no título e nas tags da vaga:
+Cada alerta chega com um indicador de compatibilidade baseado no stack técnico detectado. O algoritmo analisa **tanto o título quanto a descrição completa da vaga** para garantir precisão:
 - 🟢 **Alto** — 2+ tecnologias do stack avançado identificadas
 - 🟡 **Médio** — 1 tecnologia identificada
 - 🔵 **Padrão** — sem tech específica no título (ainda relevante)
@@ -49,7 +51,7 @@ Roda automaticamente na nuvem sem precisar de servidor ou PC ligado:
 ```
 GitHub Actions (agendado)
     ↓
-Varre Gupy + LinkedIn + ProgramaThor
+Varre Gupy + LinkedIn + ProgramaThor + Solides + InHire
     ↓
 Aplica filtros de perfil (senioridade, gaps, data)
     ↓
