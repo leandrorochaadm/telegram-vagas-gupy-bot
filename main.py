@@ -46,7 +46,8 @@ GAPS_ELIMINATORIOS = [
 
 EMPRESAS_IGNORADAS = [
     "hired",
-    "Jobgether"
+    "Jobgether",
+    "Quik Hire Staffing"
     # Adicione outras empresas que deseja ignorar aqui
 ]
 

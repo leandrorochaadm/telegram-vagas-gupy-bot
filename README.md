@@ -30,6 +30,7 @@ Partindo dessa base, evoluí o projeto para atender minha própria realidade com
 ### 🎯 Filtros inteligentes baseados em perfil
 - **Senioridade:** o bot agora busca todas as senioridades, focado no nível Sênior (o antigo bloqueio foi removido).
 - **Gaps eliminatórios:** bloqueia vagas com PHP, Python, Node.js, React Native, KMP, modelo presencial, Fullstack, Swift, Kotlin, UX, exigência de inglês fluente/avançado, entre outros.
+- **Empresas ignoradas:** lista personalizada para ocultar automaticamente vagas de empresas específicas (ex. consultorias ou plataformas indesejadas) em todas as fontes.
 - **Vagas recentes:** limita a vagas publicadas nos últimos 3 dias
 - **Deduplicação dupla:** por URL (banco SQLite) + por título/empresa na sessão
 
@@ -93,6 +94,11 @@ Abra o `main.py` e ajuste as constantes de perfil:
 # Termos que eliminam a vaga (tecnologias fora do seu stack)
 GAPS_ELIMINATORIOS = [
     "php", "python", "react native", "presencial", ...
+]
+
+# Empresas cujas vagas você deseja ignorar (busca case-insensitive)
+EMPRESAS_IGNORADAS = [
+    "hired", "Jobgether", "Quik Hire Staffing"
 ]
 
 # Tecnologias do seu stack avançado (peso 2 no score)
