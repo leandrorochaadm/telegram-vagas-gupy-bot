@@ -41,11 +41,12 @@ GAPS_ELIMINATORIOS = [
     "node.js", "node", "sqs", "rabbitmq", "product manager",
     "product owner", "vue.js", "vue js", "salesforce", "sales force", "react", "apex", 
     "kubernetes", "kafka", "dot net", ".net", "ruby", "go", "ruby on rails", "angular", "product designer", 
-    "tester", "quality assurance", "analista de testes", "qa", "fullstack", "swift", "kotlin",  "maker",  "CRO", "ux designer"
+    "tester", "quality assurance", "analista de testes", "qa", "fullstack", "maker",  "CRO", "ux designer"
 ]
 
 EMPRESAS_IGNORADAS = [
     "hired",
+    "Hired Feed"
     "Jobgether",
     "Quik Hire Staffing"
     # Adicione outras empresas que deseja ignorar aqui
@@ -619,6 +620,13 @@ def buscar_vagas_solides(conn, cursor):
                     link = vaga.get('redirectLink', '')
                     if not link:
                         continue
+
+                    # Correção da URL da vaga Solides
+                    match_url = re.search(r'https://([^.]+)\.solides\.jobs/vacancies/(\d+)', link)
+                    if match_url:
+                        company_slug = match_url.group(1)
+                        vacancy_id = match_url.group(2)
+                        link = f"https://{company_slug}.vagas.solides.com.br/vaga/{vacancy_id}"
 
                     empresa = vaga.get('companyName', 'Empresa não informada')
                     bloqueada, motivo = filtros_basicos(titulo, empresa)
