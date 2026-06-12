@@ -34,38 +34,128 @@ carregar_env()
 TOKEN   = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID_GRUPO")
 
-# --- 2. PERFIL DE CARLOS ANDRÉ ---
+# ════════════════════════════════════════════════════════════════════════════════
+# 2. CONFIGURAÇÕES DO USUÁRIO
+# Tudo que você precisa alterar para adaptar o bot ao seu perfil está aqui.
+# ════════════════════════════════════════════════════════════════════════════════
 
+# ──────────────────────────────────────────────────────────────────────────────
+# A. BUSCAS — o que procurar em cada plataforma
+# ──────────────────────────────────────────────────────────────────────────────
+# "nome" é o label exibido no alerta do Telegram.
+
+# Gupy: busca por cargo (jobName) e modalidade (workplaceTypes).
+# workplaceTypes válidos: 'remote' | 'hybrid' | 'on-site'
+FILTROS_GUPY = [
+    {"nome": "FLUTTER · REMOTO", "params": {'workplaceTypes': 'remote', 'jobName': 'flutter', 'limit': 10}},
+    {"nome": "MOBILE · REMOTO",  "params": {'workplaceTypes': 'remote', 'jobName': 'mobile',  'limit': 10}},
+]
+
+# ProgramaThor: busca por termo de texto + filtro de localização.
+# local_filtro válidos: 'remoto' | 'sp'
+FILTROS_PROGRAMATHOR = [
+    {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
+    {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
+]
+
+# LinkedIn (API guest): keywords + localização + filtros de data e modalidade.
+# f_WT=2 → remoto | f_TPR=r259200 → últimos 3 dias
+# Para outros países, altere o campo "location".
+FILTROS_LINKEDIN = [
+    {"nome": "FLUTTER · REMOTO", "params": {"keywords": "flutter", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
+    {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile",  "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
+]
+
+# Inhire: busca por termo no título + filtro de localização.
+# local_filtro válidos: 'remoto' | 'presencial'
+# Requer também EMPRESAS_INHIRE abaixo (lista de subdomínios monitorados).
+FILTROS_INHIRE = [
+    {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
+    {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
+]
+
+# Inhire — empresas monitoradas.
+# Adicione apenas o subdomínio: ex. "empresa" para empresa.inhire.app
+EMPRESAS_INHIRE = [
+    "reclameaqui",
+    "mottu",
+    "solutis",
+    "avenue",
+    "dtidigital",
+    "frameworkdigital",
+    "deal",
+    "aarin",
+    'kobe',
+    'peers',
+    'cubos',
+    'iconit',
+    'exa',
+    'programmers',
+    'growdev',
+    'aarin',
+    'wtime'
+]
+
+# Solides: busca por título.
+# 'take' define quantas vagas por página (máx. recomendado: 14).
+FILTROS_SOLIDES = [
+    {"nome": "FLUTTER · REMOTO", "params": {'title': 'flutter', 'take': 14}},
+    {"nome": "MOBILE · REMOTO",  "params": {'title': 'mobile',  'take': 14}},
+]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# B. PERFIL — palavras-chave e empresas que bloqueiam a vaga
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Período máximo de publicação aceito. Vagas mais antigas são ignoradas.
+# Dica: na primeira execução, aumente os valores para preencher o histórico
+# (ex: 30 dias), depois retorne ao padrão.
+DIAS_BUSCA_GUPY    = 3   # Gupy    → padrão: 3 dias
+DIAS_BUSCA_SOLIDES = 20  # Solides → padrão: 20 dias
+
+# Qualquer termo abaixo encontrado no título da vaga a elimina da lista.
+# Use letras minúsculas — a busca é case-insensitive.
 GAPS_ELIMINATORIOS = [
     "inglês avançado", "inglês fluente", "presencial", "php", "python",
     "node.js", "node", "sqs", "rabbitmq", "product manager",
-    "product owner", "vue.js", "vue js", "salesforce", "sales force", "react", "apex", 
-    "kubernetes", "kafka", "dot net", ".net", "ruby", "go", "ruby on rails", "angular", "product designer", 
-    "tester", "quality assurance", "analista de testes", "qa", "fullstack", "maker",  "CRO", "ux designer"
+    "product owner", "vue.js", "java", "vue js", "salesforce", "sales force", "react", "apex",
+    "kubernetes", "kafka", "dot net", ".net", "ruby", "go", "ruby on rails", "angular", "product designer",
+    "tester", "quality assurance", "analista de testes", "qa", "fullstack", "maker", "CRO", "ux designer","typescript", "adsales", "marketing",
+    "bi analyst", "offshore", "automation", "cobol", "mainframe", "head of sales", "ai developer", "editor de vídeo"
 ]
 
+# Vagas dessas empresas são ignoradas em todas as fontes.
+# A comparação é parcial e case-insensitive: "hired" também bloqueia "Hired Feed".
 EMPRESAS_IGNORADAS = [
     "hired",
-    "Hired Feed"
+    "Hired Feed",
+    "Hire Feed",
     "Jobgether",
-    "Quik Hire Staffing"
+    "Quik Hire Staffing",
     # Adicione outras empresas que deseja ignorar aqui
 ]
 
-STACK_AVANCADO = [
-    "flutter", "dart", "clean architecture", "bloc", "cubit", "provider", "riverpod", "getx", "mobx",
+# ──────────────────────────────────────────────────────────────────────────────
+# C. MINHA STACK — tecnologias que você domina (usadas para calcular o match)
+# ──────────────────────────────────────────────────────────────────────────────
+# Níveis de match (quantidade de itens encontrados no texto da vaga):
+#   🔴 Baixo  → 0 itens   |  🔵 Padrão → 1 item
+#   🟡 Médio  → 2 itens   |  🟢 Alto   → 3 ou mais
+#
+# Atenção: Gupy, LinkedIn e Inhire analisam apenas o título da vaga.
+# ProgramaThor usa título + tags; Solides usa título + descrição completa.
+MINHA_STACK = [
+    "flutter", "dart", "clean architecture", "bloc", "cubit", "provider", "riverpod",  "mobx",
     "firebase", "crashlytics", "remote config", "firebase performance", "firebase authentication",
-    "onesignal", "cloud messaging", "api rest", "apis rest", "rest apis", "restful", "graphql", "dio", "retrofit",
-    "flutter_test", "mocktail", "mockito", "tdd", "code coverage", "solid", "design patterns", "mvvm", "ddd",
-    "cross-platform", "cross platform", "android", "ios", 
-    "codemagic", "github actions", "bitrise", "fastlane", "gitflow",
+    "onesignal", "cloud messaging", "api rest", "apis rest", "rest apis", "restful",  "dio", 
+    "flutter_test", "mocktail", "mockito", "tdd", "code coverage", "solid", "design patterns", 
+    "cross-platform", "cross platform", "android", "ios",
+    "codemagic", "github actions",  "fastlane", "gitflow",
     "sqlite", "isar", "hive", "sharedpreferences", "fluttersecurestorage",
-    "tech lead", "agile", "scrum", "kanban", "mentoria", "code review", "sênior", "pleno", "SN", "PL"
-]
-
-STACK_INTERMEDIARIO = [
+    "tech lead", "agile", "scrum", "kanban",  "code review", "sênior", "pleno", "SN", "PL",
     "devsecops", "micro front end", "testes de widget", "widget tests", "integration tests",
-    "offline first", "finops", "ci/cd", "mysql", "banco de dados", "docker", "figma"
+    "offline first", "finops", "ci/cd", "mysql", "banco de dados", "figma", "flutter sdk", "solid", 
+    "modularização", "modular", "bloc_test", "clarity", "app store", "play store", "publicação", "push notifications"
 ]
 
 # Set em memória para evitar duplicatas na mesma execução (mesma vaga, fontes/buscas diferentes)
@@ -80,17 +170,37 @@ def tem_gap_eliminatorio(titulo):
     return any(g in t for g in GAPS_ELIMINATORIOS)
 
 def calcular_match(titulo):
+    """
+    Calcula o nível de compatibilidade da vaga com o perfil do candidato.
+
+    O parâmetro `titulo` pode conter mais do que apenas o título da vaga —
+    cada fonte passa textos diferentes:
+      - Gupy:        apenas o título da vaga
+      - LinkedIn:    apenas o título da vaga
+      - Inhire:      apenas o título da vaga
+      - ProgramaThor: título + tags de tecnologia exibidas no card
+      - Solides:     título + descrição completa da vaga (HTML limpo)
+
+    Para Gupy, LinkedIn e Inhire, tecnologias mencionadas somente na descrição
+    NÃO são detectadas, podendo resultar em nível Baixo para vagas relevantes.
+
+    Níveis de match (baseado na contagem de itens de MINHA_STACK encontrados):
+      🔴 Baixo  — 0 itens compatíveis
+      🔵 Padrão — 1 item compatível
+      🟡 Médio  — 2 itens compatíveis
+      🟢 Alto   — 3 ou mais itens compatíveis
+    """
     t = titulo.lower()
-    techs_av  = [s for s in STACK_AVANCADO      if s in t]
-    techs_int = [s for s in STACK_INTERMEDIARIO  if s in t]
-    score = len(techs_av) * 2 + len(techs_int)
-    techs = techs_av + techs_int
-    if score >= 4:
+    techs = [s for s in MINHA_STACK if s in t]
+    score = len(techs)
+    if score >= 3:
         nivel = "🟢 Alto"
-    elif score >= 2:
+    elif score == 2:
         nivel = "🟡 Médio"
-    else:
+    elif score == 1:
         nivel = "🔵 Padrão"
+    else:
+        nivel = "🔴 Baixo"
     return nivel, techs
 
 # --- 3. BANCO E TELEGRAM ---
@@ -175,12 +285,7 @@ def buscar_vagas_gupy(conn, cursor):
     }
     url_api = "https://employability-portal.gupy.io/api/v1/jobs"
 
-    filtros = [
-        {"nome": "FLUTTER · REMOTO", "params": {'workplaceTypes': 'remote', 'jobName': 'flutter', 'limit': 10}},
-        {"nome": "MOBILE · REMOTO",  "params": {'workplaceTypes': 'remote', 'jobName': 'mobile',  'limit': 10}},
-    ]
-
-    for filtro in filtros:
+    for filtro in FILTROS_GUPY:
         print(f"\n   🔎 {filtro['nome']}...")
         vagas_velhas  = 0
         LIMITE_VELHAS = 20
@@ -222,7 +327,7 @@ def buscar_vagas_gupy(conn, cursor):
                         data_brt = data_utc - timedelta(hours=3)
                         data_f   = data_brt.strftime("%d/%m/%Y")
                         hora_f   = data_brt.strftime("%H:%M")
-                        if datetime.now() - data_brt > timedelta(days=3):
+                        if datetime.now() - data_brt > timedelta(days=DIAS_BUSCA_GUPY):
                             print(f"   📅 Vaga antiga ({data_f}). Encerrando busca.")
                             vagas_velhas = LIMITE_VELHAS
                             break
@@ -281,12 +386,7 @@ def buscar_vagas_programathor(conn, cursor):
         'Accept-Language': 'pt-BR,pt;q=0.9',
     }
 
-    filtros = [
-        {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
-        {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
-    ]
-
-    for filtro in filtros:
+    for filtro in FILTROS_PROGRAMATHOR:
         print(f"\n   🔎 {filtro['nome']}...")
 
         for pagina in range(1, 6):
@@ -398,13 +498,7 @@ def buscar_vagas_linkedin(conn, cursor):
     }
     url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 
-    # f_TPR=r259200 → últimos 3 dias | f_WT=2 → remoto
-    filtros = [
-        {"nome": "FLUTTER · REMOTO", "params": {"keywords": "flutter", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
-        {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile",  "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
-    ]
-
-    for filtro in filtros:
+    for filtro in FILTROS_LINKEDIN:
         print(f"\n   🔎 {filtro['nome']}...")
         try:
             resp = requests.get(url, params=filtro["params"], headers=headers, timeout=15)
@@ -466,25 +560,6 @@ def buscar_vagas_linkedin(conn, cursor):
 
 # --- 7. INHIRE ---
 
-EMPRESAS_INHIRE = [
-    "reclameaqui",
-    "mottu",
-    "solutis",
-    "avenue",
-    "dtidigital",
-    "frameworkdigital",
-    "deal",
-    "aarin",
-    'kobe',
-    'peers',
-    'cubos',
-    'iconit',
-    'exa',
-    'programmers',
-    'growdev'
-    # Adicione outras empresas da inhire aqui (apenas o subdomínio, ex: empresa.inhire.app -> "empresa")
-]
-
 def buscar_vagas_inhire(conn, cursor):
     print("\n🟣 INHIRE — iniciando varredura...")
 
@@ -492,11 +567,6 @@ def buscar_vagas_inhire(conn, cursor):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     }
     url_base = "https://api.inhire.app/job-posts/public/pages"
-
-    filtros = [
-        {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
-        {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
-    ]
 
     for empresa_slug in EMPRESAS_INHIRE:
         print(f"\n   🏢 {empresa_slug.upper()}...")
@@ -516,7 +586,7 @@ def buscar_vagas_inhire(conn, cursor):
                 print("   🔚 Nenhuma vaga encontrada.")
                 continue
 
-            for filtro in filtros:
+            for filtro in FILTROS_INHIRE:
                 # Vamos buscar vagas para cada filtro
                 for job in jobs:
                     if job.get('status') != 'published':
@@ -578,12 +648,7 @@ def buscar_vagas_solides(conn, cursor):
     }
     url_base = "https://apigw.solides.com.br/jobs/v3/portal-vacancies-new"
 
-    filtros = [
-        {"nome": "FLUTTER · REMOTO", "params": {'title': 'flutter', 'take': 14}},
-        {"nome": "MOBILE · REMOTO",  "params": {'title': 'mobile',  'take': 14}},
-    ]
-
-    for filtro in filtros:
+    for filtro in FILTROS_SOLIDES:
         print(f"\n   🔎 {filtro['nome']}...")
         
         for pagina in range(1, 10):
@@ -643,6 +708,9 @@ def buscar_vagas_solides(conn, cursor):
                             # Tentar extrair "YYYY-MM-DD"
                             data_pub = datetime.strptime(data_iso[:10], "%Y-%m-%d")
                             data_f = data_pub.strftime("%d/%m/%Y")
+                            if datetime.now() - data_pub > timedelta(days=DIAS_BUSCA_SOLIDES):
+                                print(f"   📅 Vaga antiga ({data_f}). Pulando.")
+                                continue
                         except Exception:
                             data_f = data_iso
                     else:
