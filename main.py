@@ -48,14 +48,14 @@ CHAT_ID = os.getenv("CHAT_ID_GRUPO")
 # workplaceTypes válidos: 'remote' | 'hybrid' | 'on-site'
 FILTROS_GUPY = [
     {"nome": "FLUTTER · REMOTO", "params": {'workplaceTypes': 'remote', 'jobName': 'flutter', 'limit': 10}},
-    {"nome": "MOBILE · REMOTO",  "params": {'workplaceTypes': 'remote', 'jobName': 'mobile',  'limit': 10}},
+    # {"nome": "MOBILE · REMOTO",  "params": {'workplaceTypes': 'remote', 'jobName': 'mobile',  'limit': 10}},
 ]
 
 # ProgramaThor: busca por termo de texto + filtro de localização.
 # local_filtro válidos: 'remoto' | 'sp'
 FILTROS_PROGRAMATHOR = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
-    {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
+    # {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
 ]
 
 # LinkedIn (API guest): keywords + localização + filtros de data e modalidade.
@@ -63,7 +63,7 @@ FILTROS_PROGRAMATHOR = [
 # Para outros países, altere o campo "location".
 FILTROS_LINKEDIN = [
     {"nome": "FLUTTER · REMOTO", "params": {"keywords": "flutter", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
-    {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile",  "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
+    # {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile",  "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
 ]
 
 # Inhire: busca por termo no título + filtro de localização.
@@ -71,7 +71,7 @@ FILTROS_LINKEDIN = [
 # Requer também EMPRESAS_INHIRE abaixo (lista de subdomínios monitorados).
 FILTROS_INHIRE = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
-    {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
+    # {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
 ]
 
 # Inhire — empresas monitoradas.
@@ -101,14 +101,16 @@ EMPRESAS_INHIRE = [
     'jump',
     'via',
     'contaazul',
-    'semantix'
+    'semantix',
+    'mazzatech',
+    'cappta'
 ]
 
 # Solides: busca por título.
 # 'take' define quantas vagas por página (máx. recomendado: 14).
 FILTROS_SOLIDES = [
     {"nome": "FLUTTER · REMOTO", "params": {'title': 'flutter', 'take': 14}},
-    {"nome": "MOBILE · REMOTO",  "params": {'title': 'mobile',  'take': 14}},
+    # {"nome": "MOBILE · REMOTO",  "params": {'title': 'mobile',  'take': 14}},
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
