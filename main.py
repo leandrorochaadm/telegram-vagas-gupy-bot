@@ -47,12 +47,15 @@ CHAT_ID = os.getenv("CHAT_ID_GRUPO")
 # Gupy: busca por cargo (jobName) e modalidade (workplaceTypes).
 # workplaceTypes válidos: 'remote' | 'hybrid' | 'on-site'
 FILTROS_GUPY = [
-    {"nome": "FLUTTER · REMOTO", "params": {'workplaceTypes': 'remote', 'jobName': 'flutter', 'limit': 10}},
+    {"nome": "FLUTTER · REMOTO", "params": {'workplaceTypes': 'remote', 'jobName': 'flutter', 'limit': 15}},
     # {"nome": "MOBILE · REMOTO",  "params": {'workplaceTypes': 'remote', 'jobName': 'mobile',  'limit': 10}},
 ]
 
-# ProgramaThor: busca por termo de texto + filtro de localização.
-# local_filtro válidos: 'remoto' | 'sp'
+# ProgramaThor: busca por termo + slug de localidade da URL.
+# local_filtro é o slug exato usado na URL do ProgramaThor:
+#   'remoto'     → /jobs-flutter/remoto
+#   'sao-paulo'  → /jobs-flutter/sao-paulo
+#   ''           → /jobs-flutter  (sem filtro de local)
 FILTROS_PROGRAMATHOR = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
     # {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
@@ -120,7 +123,7 @@ FILTROS_SOLIDES = [
 # Período máximo de publicação aceito. Vagas mais antigas são ignoradas.
 # Dica: na primeira execução, aumente os valores para preencher o histórico
 # (ex: 30 dias), depois retorne ao padrão.
-DIAS_BUSCA_GUPY    = 3   # Gupy    → padrão: 3 dias
+DIAS_BUSCA_GUPY    = 10   # Gupy    → padrão: 10 dias
 DIAS_BUSCA_SOLIDES = 20  # Solides → padrão: 20 dias
 
 # Qualquer termo abaixo encontrado no título da vaga a elimina da lista.
@@ -399,13 +402,16 @@ def buscar_vagas_programathor(conn, cursor):
     for filtro in FILTROS_PROGRAMATHOR:
         print(f"\n   🔎 {filtro['nome']}...")
 
+        # Monta URL base: /jobs-{termo}/{local_filtro} ou /jobs-{termo} se sem local
+        termo        = filtro["termo"].lower()
+        local_filtro = filtro.get("local_filtro", "")
+        base_url     = f"https://programathor.com.br/jobs-{termo}/{local_filtro}" if local_filtro else f"https://programathor.com.br/jobs-{termo}"
+
         for pagina in range(1, 6):
-            params = {"search": filtro["termo"]}
-            if pagina > 1:
-                params["page"] = pagina
+            params = {} if pagina == 1 else {"page": pagina}
 
             try:
-                resp = requests.get("https://programathor.com.br/jobs", params=params, headers=headers, timeout=15)
+                resp = requests.get(base_url, params=params, headers=headers, timeout=15)
                 if resp.status_code != 200:
                     print(f"   🛑 HTTP {resp.status_code}")
                     break
@@ -439,15 +445,6 @@ def buscar_vagas_programathor(conn, cursor):
                     nivel   = spans[4].get_text(strip=True) if len(spans) > 4 else ""
                     tipo    = spans[5].get_text(strip=True) if len(spans) > 5 else ""
                     tags    = [t.get_text(strip=True) for t in card.select('span.tag-list')]
-
-                    # Filtro de local (SP ou Remoto)
-                    local_lower = local.lower()
-                    if filtro["local_filtro"] == "sp" and "são paulo" not in local_lower and "sp" not in local_lower and "híbrido" not in local_lower:
-                        continue
-                    if filtro["local_filtro"] == "remoto" and "remoto" not in local_lower:
-                        continue
-
-                    # (Removido filtro de Sênior)
 
                     # Filtros básicos (gap no título ou empresa ignorada)
                     bloqueada, motivo = filtros_basicos(titulo, empresa)
