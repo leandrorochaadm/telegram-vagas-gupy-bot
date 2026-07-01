@@ -106,7 +106,8 @@ EMPRESAS_INHIRE = [
     'contaazul',
     'semantix',
     'mazzatech',
-    'cappta'
+    'cappta',
+    'nstech'
 ]
 
 # Solides: busca por título.
