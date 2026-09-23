@@ -2,12 +2,18 @@ name: Vagas Bot
 
 on:
   schedule:
-    - cron: '0 11,13,15,17,19,21,23 * * 1-5'  # Seg-Sex: 8h, 10h, 12h, 14h, 16h, 18h, 20h (BRT)
-    - cron: '0 13,17,21 * * 0,6'               # Sáb-Dom: 10h, 14h, 18h (BRT)
-  workflow_dispatch:                             # Permite rodar manualmente pelo GitHub
+    # Minutes off the top of the hour: GitHub delays/drops runs scheduled at :00
+    - cron: '7,37 11-23 * * 1-5'  # Seg-Sex: a cada 30 min, 8h07 às 20h37 (BRT)
+    - cron: '7 13-21 * * 0,6'     # Sáb-Dom: a cada 1h, 10h07 às 18h07 (BRT)
+  workflow_dispatch:              # Permite rodar manualmente pelo GitHub
 
 permissions:
   contents: write
+
+# Avoid two runs overlapping and racing on the vagas_gupy.db push
+concurrency:
+  group: vagas-bot
+  cancel-in-progress: false
 
 jobs:
   buscar-vagas:
@@ -38,4 +44,6 @@ jobs:
           git config --local user.name "Vagas Bot"
           git add vagas_gupy.db
           git diff --staged --quiet || git commit -m "chore: atualiza vagas_gupy.db [skip ci]"
+          # Pick up commits pushed to main while the bot was running, otherwise the push is rejected
+          git pull --rebase
           git push
