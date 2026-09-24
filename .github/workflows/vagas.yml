@@ -1,10 +1,12 @@
 name: Vagas Bot
 
 on:
+  # Main schedule lives in scheduler/wrangler.jsonc: a Cloudflare Worker calls
+  # workflow_dispatch on time, since GitHub's own schedule is delayed/dropped.
+  # This sparse cron is only a fallback in case the Worker stops (e.g. expired
+  # token); extra runs are harmless because sent jobs are deduplicated in the db.
   schedule:
-    # Minutes off the top of the hour: GitHub delays/drops runs scheduled at :00
-    - cron: '7,37 11-23 * * 1-5'  # Seg-Sex: a cada 30 min, 8h07 às 20h37 (BRT)
-    - cron: '7 13-21 * * 0,6'     # Sáb-Dom: a cada 1h, 10h07 às 18h07 (BRT)
+    - cron: '23 12,16,20 * * *'   # Reserva: 9h23, 13h23 e 17h23 (BRT), todo dia
   workflow_dispatch:              # Permite rodar manualmente pelo GitHub
 
 permissions:

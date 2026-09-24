@@ -283,7 +283,7 @@ O bot conta quantos itens de `MINHA_STACK` foram encontrados no texto da vaga:
 
 ## 🤖 Configurando o GitHub Actions
 
-O bot roda automaticamente via GitHub Actions no schedule definido em `.github/workflows/`.
+O bot roda via GitHub Actions. O agendamento principal é feito por um Cloudflare Worker (pasta `scheduler/`), e o workflow tem um agendamento de reserva com poucos horários.
 
 ### 1. Adicione os secrets no repositório
 
@@ -298,13 +298,32 @@ Vá em **Settings → Secrets and variables → Actions → New repository secre
 
 Após o fork, vá em **Actions** no seu repositório e clique em **"I understand my workflows, go ahead and enable them"** se aparecer o aviso de workflows desabilitados.
 
-### 3. Horários de execução (padrão)
+### 3. Horários de execução
 
-O schedule padrão configurado no workflow é:
-- **Segunda a sexta:** 8h, 10h, 12h, 14h, 16h, 18h e 20h (BRT)
-- **Sábado e domingo:** 10h, 14h e 18h (BRT)
+O agendamento nativo do GitHub Actions atrasa ou pula execuções. Por isso, o horário principal fica num Cloudflare Worker (grátis), que dispara o workflow no minuto certo:
+- **Segunda a sexta:** a cada 30 min, das 8h07 às 20h37 (BRT)
+- **Sábado e domingo:** a cada 1h, das 10h07 às 18h07 (BRT)
 
-Para alterar, edite o arquivo `.github/workflows/*.yml` e ajuste as expressões cron.
+Como **reserva**, o próprio workflow roda às 9h23, 13h23 e 17h23 (BRT), todo dia. Se o Worker parar (por exemplo, com o token vencido), o bot continua rodando, só que menos vezes. Execuções extras não duplicam vagas, porque o banco guarda o que já foi enviado.
+
+Para alterar os horários principais, edite `scheduler/wrangler.jsonc` e publique de novo. Para alterar a reserva, edite `.github/workflows/vagas.yml`. As expressões cron usam UTC (BRT = UTC-3).
+
+### 4. Agendamento preciso com Cloudflare Worker (opcional)
+
+Sem este passo, o bot roda só nos horários de reserva.
+
+1. Crie um token no GitHub em **Settings → Developer settings → Fine-grained tokens**, com acesso só ao seu fork e permissão **Actions: Read and write**.
+2. No arquivo `scheduler/wrangler.jsonc`, troque `GITHUB_REPO` pelo seu `usuario/repositorio`.
+3. Dentro da pasta `scheduler/`, rode:
+   ```bash
+   npm install
+   npx wrangler login
+   npx wrangler secret put GITHUB_TOKEN   # cole o token quando pedir
+   npm run deploy
+   ```
+4. Para testar, abra no painel da Cloudflare **Workers → vagas-bot-scheduler → Settings → Triggers** e dispare o cron. Depois confira se aparece uma execução nova na aba **Actions**. Os logs ficam em `npx wrangler tail`.
+
+> **Atenção:** o token do GitHub expira (no máximo em 1 ano). Anote a data e renove com `npx wrangler secret put GITHUB_TOKEN`.
 
 ---
 
