@@ -283,7 +283,7 @@ O bot conta quantos itens de `MINHA_STACK` foram encontrados no texto da vaga:
 
 ## 🤖 Configurando o GitHub Actions
 
-O bot roda via GitHub Actions. O agendamento principal é feito por um Cloudflare Worker (pasta `scheduler/`), e o workflow tem um agendamento de reserva com poucos horários.
+O bot roda via GitHub Actions. O agendamento principal é feito por um Cloudflare Worker, e o workflow tem um agendamento de reserva com poucos horários.
 
 ### 1. Adicione os secrets no repositório
 
@@ -301,29 +301,14 @@ Após o fork, vá em **Actions** no seu repositório e clique em **"I understand
 ### 3. Horários de execução
 
 O agendamento nativo do GitHub Actions atrasa ou pula execuções. Por isso, o horário principal fica num Cloudflare Worker (grátis), que dispara o workflow no minuto certo:
-- **Segunda a sexta:** a cada 30 min, das 8h07 às 20h37 (BRT)
-- **Sábado e domingo:** a cada 1h, das 10h07 às 18h07 (BRT)
+- **Segunda a sexta:** a cada 30 min, das 8h às 20h30 (BRT)
+- **Sábado e domingo:** a cada 1h, das 10h às 18h (BRT)
 
 Como **reserva**, o próprio workflow roda às 9h23, 13h23 e 17h23 (BRT), todo dia. Se o Worker parar (por exemplo, com o token vencido), o bot continua rodando, só que menos vezes. Execuções extras não duplicam vagas, porque o banco guarda o que já foi enviado.
 
-Para alterar os horários principais, edite `scheduler/wrangler.jsonc` e publique de novo. Para alterar a reserva, edite `.github/workflows/vagas.yml`. As expressões cron usam UTC (BRT = UTC-3).
+O Worker fica no repositório [workana-telegram-bot](https://github.com/leandrorochaadm/workana-telegram-bot) (pasta `scheduler/`) e dispara os dois bots. Para alterar os horários principais, edite a regra `gupy` em `scheduler/src/index.js`, escrita em horário de Brasília. Para alterar a reserva, edite `.github/workflows/vagas.yml` (cron em UTC; BRT = UTC-3).
 
-### 4. Agendamento preciso com Cloudflare Worker (opcional)
-
-Sem este passo, o bot roda só nos horários de reserva.
-
-1. Crie um token no GitHub em **Settings → Developer settings → Fine-grained tokens**, com acesso só ao seu fork e permissão **Actions: Read and write**.
-2. No arquivo `scheduler/wrangler.jsonc`, troque `GITHUB_REPO` pelo seu `usuario/repositorio`.
-3. Dentro da pasta `scheduler/`, rode:
-   ```bash
-   npm install
-   npx wrangler login
-   npx wrangler secret put GITHUB_TOKEN   # cole o token quando pedir
-   npm run deploy
-   ```
-4. Para testar, abra no painel da Cloudflare **Workers → vagas-bot-scheduler → Settings → Triggers** e dispare o cron. Depois confira se aparece uma execução nova na aba **Actions**. Os logs ficam em `npx wrangler tail`.
-
-> **Atenção:** o token do GitHub expira (no máximo em 1 ano). Anote a data e renove com `npx wrangler secret put GITHUB_TOKEN`.
+Em um fork, sem o Worker, o bot roda só nos horários de reserva. Para ter o agendamento preciso, publique um Worker como o do workana-telegram-bot apontando para o seu repositório, com um token (fine-grained) com permissão **Actions: Read and write**.
 
 ---
 

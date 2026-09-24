@@ -1,8 +1,9 @@
 name: Vagas Bot
 
 on:
-  # Main schedule lives in scheduler/wrangler.jsonc: a Cloudflare Worker calls
-  # workflow_dispatch on time, since GitHub's own schedule is delayed/dropped.
+  # Main schedule lives in the workana-telegram-bot repo (scheduler/src/index.js):
+  # a Cloudflare Worker calls workflow_dispatch on time, since GitHub's own
+  # schedule is delayed/dropped.
   # This sparse cron is only a fallback in case the Worker stops (e.g. expired
   # token); extra runs are harmless because sent jobs are deduplicated in the db.
   schedule:
