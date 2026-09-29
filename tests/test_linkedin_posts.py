@@ -167,6 +167,11 @@ class BuscarPostsLinkedinTest(unittest.TestCase):
             title="Maria on LinkedIn: vaga Flutter", description="Trabalho remoto"))])
         main.enviar_telegram.assert_called_once()
 
+    def test_accepts_vagas_plural(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(
+            title="Maria on LinkedIn: vagas Flutter", description="Trabalho remoto"))])
+        main.enviar_telegram.assert_called_once()
+
     def test_skips_already_sent_link(self):
         post = linkedin_posts.parse_result(brave_result())
         self.cursor.execute("INSERT INTO vagas_enviadas VALUES (?, '', '')", (post["link"],))
