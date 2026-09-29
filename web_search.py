@@ -1,21 +1,23 @@
 """Job search on the open web through the Brave Search API.
 
 Same kind of query as linkedin_posts.py, but without the `site:` restriction,
-so openings published on any site (blogs, job boards, company pages...) from
-the last 24h are found. Sites already covered by other sources (LinkedIn) are
+so openings published on any site (blogs, job boards, company pages...) in the
+last `max_age_days` are found. Sites already covered by other sources (LinkedIn) are
 left out with `-site:`. All settings come from main.py as parameters.
 """
 import html
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 import requests
 
-from linkedin_posts import BRAVE_URL, MAX_AGE, MAX_OFFSET, REQUEST_INTERVAL, RESULTS_PER_PAGE, parse_page_age
+from linkedin_posts import BRAVE_URL, MAX_OFFSET, REQUEST_INTERVAL, RESULTS_PER_PAGE, parse_page_age
 
 SUMMARY_MAX_CHARS = 300
+# Brave only accepts these windows: past day, week, month and year
+_FRESHNESS = [(1, "pd"), (7, "pw"), (31, "pm"), (365, "py")]
 
 
 def _strip_tags(text: str) -> str:
@@ -27,12 +29,18 @@ def _on_site(host: str, sites: list[str]) -> bool:
     return any(host == site or host.endswith("." + site) for site in sites)
 
 
+def freshness(max_age_days: int) -> str:
+    """Smallest Brave window that covers `max_age_days`."""
+    return next((code for days, code in _FRESHNESS if max_age_days <= days), "py")
+
+
 def build_query(query: str, excluded_sites: list[str]) -> str:
     # Exclusions first, so an OR inside the query can't split them off one side
     return " ".join([*(f"-site:{site}" for site in excluded_sites), query])
 
 
-def parse_web_result(result: dict, now: datetime | None = None, excluded_sites: list[str] = ()) -> dict | None:
+def parse_web_result(result: dict, now: datetime | None = None, excluded_sites: list[str] = (),
+                     max_age: timedelta = timedelta(days=1)) -> dict | None:
     """Turn any Brave web result into a page dict; the site's domain goes in `author`."""
     url = result.get("url") or ""
     host = urlsplit(url).hostname
@@ -41,28 +49,31 @@ def parse_web_result(result: dict, now: datetime | None = None, excluded_sites: 
         return None
     published = parse_page_age(result.get("page_age"))
     now = now or datetime.now(timezone.utc)
-    # freshness=pd filters by Brave's crawl date, so an old page may still slip in
-    if published and now - published > MAX_AGE:
+    # freshness filters by Brave's crawl date, so an old page may still slip in
+    if published and now - published > max_age:
         return None
     title = _strip_tags(result.get("title", ""))
     return {
         "link": url.split("#", 1)[0],
         "author": host.removeprefix("www."),
         "text": f"{title} {_strip_tags(result.get('description', ''))}".strip(),
-        "date": (published or now).strftime("%d/%m/%Y"),
+        # No page_age: the page may be days old, so don't show today's date
+        "date": published.strftime("%d/%m/%Y") if published else "Sem data",
     }
 
 
 def search_web(api_key: str, query: str, pages: int = 1, excluded_sites: list[str] = (),
-               errors: list[str] | None = None) -> list[dict]:
-    """Search pages from the past 24h matching `query`, on any site but `excluded_sites`.
+               errors: list[str] | None = None, max_age_days: int = 1) -> list[dict]:
+    """Search pages from the last `max_age_days` matching `query`, on any site but `excluded_sites`.
 
     When Brave refuses a page, the reason ("código 429") is appended to `errors`.
     """
     headers = {"Accept": "application/json", "X-Subscription-Token": api_key}
     items: list[dict] = []
+    max_age = timedelta(days=max_age_days)
     for offset in range(min(pages, MAX_OFFSET + 1)):
-        params = {"q": build_query(query, excluded_sites), "count": RESULTS_PER_PAGE, "offset": offset, "freshness": "pd"}
+        params = {"q": build_query(query, excluded_sites), "count": RESULTS_PER_PAGE, "offset": offset,
+                  "freshness": freshness(max_age_days)}
         resp = requests.get(BRAVE_URL, params=params, headers=headers, timeout=15)
         # Always wait: the next request may come from the next filter, not the next page
         time.sleep(REQUEST_INTERVAL)
@@ -73,7 +84,8 @@ def search_web(api_key: str, query: str, pages: int = 1, excluded_sites: list[st
             break
         data = resp.json()
         results = data.get("web", {}).get("results", [])
-        items += [item for r in results if (item := parse_web_result(r, excluded_sites=excluded_sites))]
+        items += [item for r in results
+                  if (item := parse_web_result(r, excluded_sites=excluded_sites, max_age=max_age))]
         if not data.get("query", {}).get("more_results_available"):
             break
     return items
@@ -91,11 +103,13 @@ def _already_sent(cursor, link: str) -> bool:
 
 
 def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, required_terms, ignored_companies, send,
-                errors: list[str] | None = None) -> None:
+                errors: list[str] | None = None, blocked_terms: list[str] = (), max_age_days: int = 1) -> None:
     """Run every filter and send the relevant, unseen pages.
 
     excluded_sites: domains left out of the search (e.g. "linkedin.com", already covered elsewhere).
     required_terms: groups of words; the text needs at least one word of each group.
+    blocked_terms: words that drop the page (e.g. "híbrido"), whole word.
+    max_age_days: how far back to search; links already sent are never sent again.
     send: main.registrar_e_enviar(conn, cursor, link, title, company, date, message, source).
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
@@ -106,13 +120,15 @@ def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, requir
 
     print("\n🌐 WEB — iniciando varredura...")
     patterns = [_word_pattern(group) for group in required_terms]
+    blocked = _word_pattern(blocked_terms) if blocked_terms else None
     ignored = [company.lower() for company in ignored_companies]
 
     for web_filter in filters:
         print(f"\n   🔎 {web_filter['nome']}...")
         brave_errors: list[str] = []
         try:
-            found = search_web(api_key, web_filter["termo"], pages, excluded_sites, errors=brave_errors)
+            found = search_web(api_key, web_filter["termo"], pages, excluded_sites,
+                               errors=brave_errors, max_age_days=max_age_days)
         except requests.RequestException as e:
             print(f"   ⚠️  Erro: {e}")
             errors.append(f"{web_filter['nome']}: a Brave não respondeu.")
@@ -129,6 +145,9 @@ def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, requir
 
             if not all(p.search(text.lower()) for p in patterns):
                 print(f"   🚫 Sem os termos obrigatórios: {text[:55]}")
+                continue
+            if blocked and (match := blocked.search(text.lower())):
+                print(f"   🚫 Tem \"{match.group()}\": {text[:55]}")
                 continue
             if any(company in site.lower() for company in ignored):
                 print(f"   🚫 Site ignorado: {site[:50]}")
