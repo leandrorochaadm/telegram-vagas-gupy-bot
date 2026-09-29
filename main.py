@@ -9,6 +9,8 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
+import linkedin_posts
+
 try:
     from bs4 import BeautifulSoup
     BS4_DISPONIVEL = True
@@ -35,6 +37,7 @@ carregar_env()
 
 TOKEN   = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID_GRUPO")
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # 2. CONFIGURAÇÕES DO USUÁRIO
@@ -71,6 +74,23 @@ FILTROS_LINKEDIN = [
     # {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile developer", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
 ]
 PAGINAS_LINKEDIN = 5  # a API guest devolve ~10 vagas por página
+
+# LinkedIn — publicações das últimas 24h (busca via Brave Search, requer BRAVE_API_KEY).
+# "termo" é pesquisado em site:linkedin.com/posts. Cada filtro × página = 1 consulta
+# (até 20 posts); o plano grátis da Brave dá ~1.000 consultas/mês (US$ 5 de crédito).
+# "OR" (maiúsculo) é operador da Brave: acha posts com "remoto" ou com "remota".
+FILTROS_POSTS_LINKEDIN = [
+    {"nome": "FLUTTER · VAGA · REMOTO", "termo": "flutter vaga remoto OR remota"},
+]
+PAGINAS_POSTS_LINKEDIN = 1
+
+# A publicação só é enviada se o texto tiver ao menos um termo de CADA grupo
+# (palavra inteira, case-insensitive): flutter E vaga E (remoto OU remota).
+TERMOS_OBRIGATORIOS_POSTS = [
+    ["flutter"],
+    ["vaga"],
+    ["remoto", "remota"],
+]
 
 # Inhire: busca por termo no título + filtro de localização.
 # local_filtro válidos: 'remoto' | 'presencial'
@@ -184,6 +204,11 @@ def _padrao_termos(termos):
 
 _RE_TITULO     = _padrao_termos([TERMO_OBRIGATORIO_TITULO])
 _RE_STACK      = [(termo, _padrao_termos([termo])) for termo in MINHA_STACK]
+_RE_POSTS      = [_padrao_termos(grupo) for grupo in TERMOS_OBRIGATORIOS_POSTS]
+
+def post_relevante(texto):
+    t = texto.lower()
+    return all(padrao.search(t) for padrao in _RE_POSTS)
 
 def titulo_relevante(titulo):
     return _RE_TITULO.search(titulo.lower()) is not None
@@ -579,6 +604,52 @@ def buscar_vagas_linkedin(conn, cursor):
                 print(f"   ⚠️  Erro: {e}")
                 break
 
+# --- 6b. LINKEDIN (PUBLICAÇÕES) ---
+
+def buscar_posts_linkedin(conn, cursor):
+    if not BRAVE_API_KEY:
+        print("\n⚠️  Publicações do LinkedIn desativadas: defina BRAVE_API_KEY no .env")
+        return
+
+    print("\n📝 LINKEDIN PUBLICAÇÕES — iniciando varredura...")
+
+    for filtro in FILTROS_POSTS_LINKEDIN:
+        print(f"\n   🔎 {filtro['nome']}...")
+        try:
+            posts = linkedin_posts.search_posts(BRAVE_API_KEY, filtro["termo"], PAGINAS_POSTS_LINKEDIN)
+        except Exception as e:
+            print(f"   ⚠️  Erro: {e}")
+            continue
+
+        for post in posts:
+            texto, autor, link = post["text"], post["author"], post["link"]
+
+            if not post_relevante(texto):
+                print(f"   🚫 Sem flutter + vaga + remoto/remota: {texto[:55]}")
+                continue
+
+            bloqueada, motivo = filtros_basicos(texto, autor)
+            if bloqueada:
+                print(f"   {motivo}")
+                continue
+
+            if ja_enviada(cursor, link):
+                continue
+
+            nivel_match, techs = calcular_match(texto)
+            techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar publicação"
+            resumo = texto if len(texto) <= 300 else texto[:300].rsplit(" ", 1)[0] + "…"
+
+            mensagem = (
+                f"📝 <b>LINKEDIN PUBLICAÇÃO — {filtro['nome']}</b>\n\n"
+                f"👤 <b>Autor:</b> {html.escape(autor)}\n"
+                f"📅 <b>Data:</b> {post['date']}\n"
+                f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
+                f"💬 {html.escape(resumo)}\n\n"
+                f"🔗 <a href='{html.escape(link)}'>Ver publicação</a>"
+            )
+            registrar_e_enviar(conn, cursor, link, texto, autor, post["date"], mensagem, "LINKEDIN_POST", nivel_match)
+
 # --- 7. INHIRE ---
 
 def buscar_vagas_inhire(conn, cursor):
@@ -809,6 +880,7 @@ def main():
     buscar_vagas_gupy(conn, cursor)
     buscar_vagas_programathor(conn, cursor)
     buscar_vagas_linkedin(conn, cursor)
+    buscar_posts_linkedin(conn, cursor)
     buscar_vagas_inhire(conn, cursor)
     buscar_vagas_solides(conn, cursor)
 

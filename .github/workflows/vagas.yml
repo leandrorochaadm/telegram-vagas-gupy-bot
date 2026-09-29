@@ -38,6 +38,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: python main.py
 
       - name: Salvar banco de dados atualizado

@@ -88,7 +88,10 @@ Abra o `.env` e preencha os valores:
 ```env
 TELEGRAM_TOKEN=seu_token_aqui
 CHAT_ID_GRUPO=seu_chat_id_aqui
+BRAVE_API_KEY=sua_chave_brave   # opcional: publicações do LinkedIn
 ```
+
+> **Como obter a `BRAVE_API_KEY` (opcional):** crie uma conta em [Brave Search API](https://brave.com/search/api/) e gere uma chave no plano grátis (US$ 5 de crédito por mês, cerca de 1.000 consultas; ative o "Monthly Usage Limit" em US$ 5 para nunca ser cobrado). Sem ela, o bot só pula a busca de publicações do LinkedIn.
 
 > **Como obter o `TELEGRAM_TOKEN`:** crie um bot no Telegram via [@BotFather](https://t.me/botfather) e copie o token gerado.
 >
@@ -170,6 +173,33 @@ FILTROS_LINKEDIN = [
 | `location` | País ou cidade | ex: `"Brazil"`, `"Portugal"` |
 | `f_WT` | Modalidade | `"2"` = remoto · `"1"` = presencial · `"3"` = híbrido |
 | `f_TPR` | Período de publicação | `"r86400"` = 24h · `"r259200"` = 3 dias · `"r604800"` = 7 dias |
+
+---
+
+#### `FILTROS_POSTS_LINKEDIN`
+
+Busca **publicações** (posts) do LinkedIn das últimas 24h, como "estamos contratando dev Flutter". A busca interna de publicações do LinkedIn exige login, então o bot pesquisa `site:linkedin.com/posts` na [Brave Search API](https://brave.com/search/api/). Requer `BRAVE_API_KEY`. O código fica em `linkedin_posts.py`.
+
+```python
+FILTROS_POSTS_LINKEDIN = [
+    {"nome": "FLUTTER · VAGA · REMOTO", "termo": "flutter vaga remoto OR remota"},
+]
+PAGINAS_POSTS_LINKEDIN = 1
+
+TERMOS_OBRIGATORIOS_POSTS = [
+    ["flutter"],
+    ["vaga"],
+    ["remoto", "remota"],
+]
+```
+
+| Campo | Descrição |
+|---|---|
+| `termo` | Termo pesquisado nas publicações |
+| `PAGINAS_POSTS_LINKEDIN` | Páginas por termo (cada filtro × página = 1 consulta, até 20 posts) |
+| `TERMOS_OBRIGATORIOS_POSTS` | Grupos de palavras: o texto precisa ter ao menos uma palavra de **cada** grupo |
+
+Com a configuração padrão, a publicação só é enviada se tiver "flutter" **e** "vaga" **e** ("remoto" **ou** "remota"), como palavras inteiras. O autor é comparado com `EMPRESAS_IGNORADAS`.
 
 ---
 
@@ -285,6 +315,7 @@ Vá em **Settings → Secrets and variables → Actions → New repository secre
 |---|---|
 | `TELEGRAM_TOKEN` | Token gerado pelo [@BotFather](https://t.me/botfather) |
 | `CHAT_ID_GRUPO` | ID do seu grupo ou canal do Telegram |
+| `BRAVE_API_KEY` | (Opcional) Chave da Brave Search API, para as publicações do LinkedIn |
 
 ### 2. Ative o workflow
 
@@ -312,6 +343,7 @@ O score é calculado contando quantos termos de `MINHA_STACK` aparecem, como pal
 |---|---|
 | Gupy | Título + descrição completa |
 | LinkedIn | Título da vaga |
+| LinkedIn (publicações) | Autor + trecho da publicação |
 | InHire | Título da vaga |
 | ProgramaThor | Título + tags de tecnologia do card |
 | Solides | Título + descrição completa (HTML limpo) |
