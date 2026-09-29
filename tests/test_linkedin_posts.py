@@ -132,12 +132,11 @@ class BuscarPostsLinkedinTest(unittest.TestCase):
         with mock.patch.object(main.linkedin_posts, "search_posts", return_value=posts):
             main.buscar_posts_linkedin(self.conn, self.cursor)
 
-    def test_sends_post_with_match_from_text(self):
+    def test_sends_post_with_author_and_link(self):
         self.run_with([linkedin_posts.parse_result(brave_result())])
         main.enviar_telegram.assert_called_once()
         mensagem = main.enviar_telegram.call_args.args[0]
         self.assertIn("Maria Souza", mensagem)
-        self.assertIn("RIVERPOD", mensagem)
         self.assertIn("Ver publicação", mensagem)
 
     def test_skips_post_without_flutter(self):

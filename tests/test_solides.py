@@ -80,13 +80,6 @@ class FlightParsingTest(unittest.TestCase):
         flight = ':HL["/font.woff2","font"]\n' + "garbage line\n" + text_row("21", "desc") + '4:"x"\n'
         self.assertEqual(main._solides_textos(flight), {"21": "desc"})
 
-    def test_description_inline_reference_missing_and_null(self):
-        textos = {"1e": "<p>ref</p>"}
-        self.assertEqual(main._solides_descricao(textos, "$1e"), "<p>ref</p>")
-        self.assertEqual(main._solides_descricao(textos, "<p>inline</p>"), "<p>inline</p>")
-        self.assertEqual(main._solides_descricao(textos, "$99"), "")
-        self.assertEqual(main._solides_descricao(textos, None), "")
-
 
 class SolidesPageTest(unittest.TestCase):
 
@@ -160,14 +153,6 @@ class BuscarVagasSolidesTest(unittest.TestCase):
 
         self.assertIn("Dev Flutter &amp; React &lt;Pleno&gt;", self.sent[0])
         self.assertIn("A&amp;B", self.sent[0])
-
-    def test_description_reference_feeds_match(self):
-        textos = {"1e": "<p>Dart Riverpod Firebase</p>"}
-        # Title alone matches only "flutter" in MINHA_STACK; the rest must come from the referenced description
-        self.run_with_pages(([make_vaga(title="Dev Flutter", description="$1e")], 1, textos))
-
-        self.assertIn("🟢 Alto", self.sent[0])
-        self.assertIn("RIVERPOD", self.sent[0])
 
     def test_skips_title_without_flutter(self):
         self.run_with_pages(([make_vaga(title="Desenvolvedor React Native")], 1, {}))

@@ -166,29 +166,6 @@ EMPRESAS_IGNORADAS = [
     # Adicione outras empresas que deseja ignorar aqui
 ]
 
-# ──────────────────────────────────────────────────────────────────────────────
-# C. MINHA STACK — tecnologias que você domina (usadas para calcular o match)
-# ──────────────────────────────────────────────────────────────────────────────
-# Níveis de match (quantidade de itens encontrados no texto da vaga):
-#   🔴 Baixo  → 0 itens   |  🔵 Padrão → 1 item
-#   🟡 Médio  → 2 itens   |  🟢 Alto   → 3 ou mais
-#
-# Atenção: LinkedIn e Inhire analisam apenas o título da vaga.
-# ProgramaThor usa título + tags; Gupy e Solides usam título + descrição completa.
-MINHA_STACK = [
-    "flutter", "dart", "clean architecture", "bloc", "cubit", "provider", "riverpod",  "mobx",
-    "firebase", "crashlytics", "remote config", "firebase performance", "firebase authentication",
-    "onesignal", "cloud messaging", "api rest", "apis rest", "rest apis", "restful",  "dio", 
-    "flutter_test", "mocktail", "mockito", "tdd", "code coverage", "solid", "design patterns", 
-    "cross-platform", "cross platform", "android", "ios",
-    "codemagic", "github actions",  "fastlane", "gitflow",
-    "sqlite", "isar", "hive", "sharedpreferences", "fluttersecurestorage",
-    "tech lead", "agile", "scrum", "kanban",  "code review", "sênior", "pleno", "SN", "PL",
-    "devsecops", "micro front end", "testes de widget", "widget tests", "integration tests",
-    "offline first", "finops", "ci/cd", "mysql", "banco de dados", "figma", "flutter sdk", "solid", 
-    "modularização", "modular", "bloc_test", "clarity", "app store", "play store", "publicação", "push notifications"
-]
-
 # Set em memória para evitar duplicatas na mesma execução (mesma vaga, fontes/buscas diferentes)
 _enviados_sessao: set = set()
 
@@ -203,7 +180,6 @@ def _padrao_termos(termos):
     return re.compile(rf"(?<!\w)(?:{alternativas})(?!\w)")
 
 _RE_TITULO     = _padrao_termos([TERMO_OBRIGATORIO_TITULO])
-_RE_STACK      = [(termo, _padrao_termos([termo])) for termo in MINHA_STACK]
 _RE_POSTS      = [_padrao_termos(grupo) for grupo in TERMOS_OBRIGATORIOS_POSTS]
 
 def post_relevante(texto):
@@ -212,45 +188,6 @@ def post_relevante(texto):
 
 def titulo_relevante(titulo):
     return _RE_TITULO.search(titulo.lower()) is not None
-
-def limpar_html(html):
-    if BS4_DISPONIVEL:
-        return BeautifulSoup(html, 'html.parser').get_text(separator=' ')
-    return re.sub(r'<[^>]+>', ' ', html)
-
-def calcular_match(titulo):
-    """
-    Calcula o nível de compatibilidade da vaga com o perfil do candidato.
-
-    O parâmetro `titulo` pode conter mais do que apenas o título da vaga —
-    cada fonte passa textos diferentes:
-      - Gupy:        título + descrição completa da vaga
-      - LinkedIn:    apenas o título da vaga
-      - Inhire:      apenas o título da vaga
-      - ProgramaThor: título + tags de tecnologia exibidas no card
-      - Solides:     título + descrição completa da vaga (HTML limpo)
-
-    Para LinkedIn e Inhire, tecnologias mencionadas somente na descrição
-    NÃO são detectadas, podendo resultar em nível Baixo para vagas relevantes.
-
-    Níveis de match (baseado na contagem de itens de MINHA_STACK encontrados):
-      🔴 Baixo  — 0 itens compatíveis
-      🔵 Padrão — 1 item compatível
-      🟡 Médio  — 2 itens compatíveis
-      🟢 Alto   — 3 ou mais itens compatíveis
-    """
-    t = titulo.lower()
-    techs = list(dict.fromkeys(termo for termo, padrao in _RE_STACK if padrao.search(t)))
-    score = len(techs)
-    if score >= 3:
-        nivel = "🟢 Alto"
-    elif score == 2:
-        nivel = "🟡 Médio"
-    elif score == 1:
-        nivel = "🔵 Padrão"
-    else:
-        nivel = "🔴 Baixo"
-    return nivel, techs
 
 # --- 3. BANCO E TELEGRAM ---
 
@@ -299,7 +236,7 @@ def enviar_telegram(mensagem):
     except Exception as e:
         print(f"❌ Erro Telegram: {e}")
 
-def registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte, nivel_match):
+def registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte):
     chave = _chave_sessao(titulo, empresa)
     if chave in _enviados_sessao:
         print(f"   🔁 Duplicata (sessão): {titulo[:50]}")
@@ -308,7 +245,7 @@ def registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fo
     cursor.execute('INSERT OR IGNORE INTO vagas_enviadas VALUES (?, ?, ?)', (link, data_f, titulo))
     conn.commit()
     enviar_telegram(mensagem)
-    print(f"   ✅ [{nivel_match}] {titulo[:50]}...")
+    print(f"   ✅ {titulo[:50]}...")
     time.sleep(2)
 
 def filtros_basicos(titulo, empresa=None):
@@ -388,8 +325,6 @@ def buscar_vagas_gupy(conn, cursor):
                         print(f"   {motivo}")
                         continue
 
-                    texto_match = f"{titulo} {vaga.get('description') or ''} {' '.join(map(str, vaga.get('skills') or []))}"
-
                     if ja_enviada(cursor, link):
                         vagas_velhas += 1
                         if vagas_velhas >= LIMITE_VELHAS:
@@ -397,8 +332,6 @@ def buscar_vagas_gupy(conn, cursor):
                         continue
 
                     vagas_velhas = 0
-                    nivel_match, techs = calcular_match(texto_match)
-                    techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar descrição"
 
                     mensagem = (
                         f"🟣 <b>GUPY — {filtro['nome']}</b>\n\n"
@@ -408,11 +341,10 @@ def buscar_vagas_gupy(conn, cursor):
                         f"💻 <b>Modelo:</b> {modelo}\n"
                         f"📄 <b>Tipo:</b> {tipo}\n"
                         f"♿ <b>PCD:</b> {pcd}\n"
-                        f"📅 <b>Data:</b> {data_f} às {hora_f}\n"
-                        f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
+                        f"📅 <b>Data:</b> {data_f} às {hora_f}\n\n"
                         f"🔗 <a href='{link}'>Aplicar na Gupy</a>"
                     )
-                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "GUPY", nivel_match)
+                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "GUPY")
 
                 if vagas_velhas >= LIMITE_VELHAS:
                     print("   🛑 Encerrando paginação.")
@@ -495,10 +427,6 @@ def buscar_vagas_programathor(conn, cursor):
 
                     novos_na_pagina += 1
 
-                    # Match scoring usa título + stack explícita do card
-                    texto_match = titulo + " " + " ".join(tags)
-                    nivel_match, techs = calcular_match(texto_match)
-                    techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else (", ".join(tags[:4]) or "Verificar descrição")
                     tags_str  = ", ".join(tags[:6]) if tags else ""
 
                     mensagem = (
@@ -510,10 +438,10 @@ def buscar_vagas_programathor(conn, cursor):
                         + (f" · {tipo}" if tipo else "") + "\n"
                         + (f"💰 <b>Salário:</b> {salario}\n" if salario else "")
                         + (f"🛠️  <b>Stack:</b> <i>{tags_str}</i>\n" if tags_str else "")
-                        + f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
+                        + "\n"
                         f"🔗 <a href='{link}'>Aplicar no ProgramaThor</a>"
                     )
-                    registrar_e_enviar(conn, cursor, link, titulo, empresa, datetime.now().strftime("%d/%m/%Y"), mensagem, "PROGRAMATHOR", nivel_match)
+                    registrar_e_enviar(conn, cursor, link, titulo, empresa, datetime.now().strftime("%d/%m/%Y"), mensagem, "PROGRAMATHOR")
 
                 if novos_na_pagina == 0:
                     break
@@ -585,18 +513,14 @@ def buscar_vagas_linkedin(conn, cursor):
                     if ja_enviada(cursor, link):
                         continue
 
-                    nivel_match, techs = calcular_match(titulo)
-                    techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar descrição"
-
                     mensagem = (
                         f"🔷 <b>LINKEDIN — {filtro['nome']}</b>\n\n"
                         f"💼 <b>Vaga:</b> {titulo}\n"
                         f"🏢 <b>Empresa:</b> {empresa}\n"
-                        f"📅 <b>Data:</b> {data_f}\n"
-                        f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
+                        f"📅 <b>Data:</b> {data_f}\n\n"
                         f"🔗 <a href='{link}'>Aplicar no LinkedIn</a>"
                     )
-                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "LINKEDIN", nivel_match)
+                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "LINKEDIN")
 
                 time.sleep(1)
 
@@ -636,19 +560,16 @@ def buscar_posts_linkedin(conn, cursor):
             if ja_enviada(cursor, link):
                 continue
 
-            nivel_match, techs = calcular_match(texto)
-            techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar publicação"
             resumo = texto if len(texto) <= 300 else texto[:300].rsplit(" ", 1)[0] + "…"
 
             mensagem = (
                 f"📝 <b>LINKEDIN PUBLICAÇÃO — {filtro['nome']}</b>\n\n"
                 f"👤 <b>Autor:</b> {html.escape(autor)}\n"
-                f"📅 <b>Data:</b> {post['date']}\n"
-                f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
+                f"📅 <b>Data:</b> {post['date']}\n\n"
                 f"💬 {html.escape(resumo)}\n\n"
                 f"🔗 <a href='{html.escape(link)}'>Ver publicação</a>"
             )
-            registrar_e_enviar(conn, cursor, link, texto, autor, post["date"], mensagem, "LINKEDIN_POST", nivel_match)
+            registrar_e_enviar(conn, cursor, link, texto, autor, post["date"], mensagem, "LINKEDIN_POST")
 
 # --- 7. INHIRE ---
 
@@ -711,8 +632,6 @@ def buscar_vagas_inhire(conn, cursor):
                         continue
                         
                     local = job.get('location', 'Não informado')
-                    nivel_match, techs = calcular_match(titulo)
-                    techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar descrição"
                     data_f = datetime.now().strftime("%d/%m/%Y")
                     
                     mensagem = (
@@ -721,11 +640,10 @@ def buscar_vagas_inhire(conn, cursor):
                         f"🏢 <b>Empresa:</b> {nome_empresa}\n"
                         f"📍 <b>Local:</b> {local}\n"
                         f"💻 <b>Modelo:</b> {modelo}\n"
-                        f"📅 <b>Data (Descoberta):</b> {data_f}\n"
-                        f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
+                        f"📅 <b>Data (Descoberta):</b> {data_f}\n\n"
                         f"🔗 <a href='{link}'>Aplicar na Inhire</a>"
                     )
-                    registrar_e_enviar(conn, cursor, link, titulo, nome_empresa, data_f, mensagem, "INHIRE", nivel_match)
+                    registrar_e_enviar(conn, cursor, link, titulo, nome_empresa, data_f, mensagem, "INHIRE")
                     
         except Exception as e:
             print(f"   ⚠️  Erro ao buscar {empresa_slug}: {e}")
@@ -764,12 +682,6 @@ def _solides_textos(flight):
             fim = dados.find(b'\n', pos)
             pos = len(dados) if fim == -1 else fim + 1
     return textos
-
-def _solides_descricao(textos, ref):
-    """A descrição vem inline ou como referência "$1e" para uma linha de texto."""
-    if isinstance(ref, str) and ref.startswith('$'):
-        return textos.get(ref[1:], '')
-    return ref or ''
 
 def _solides_pagina(caminho, pagina, headers):
     """Retorna (vagas, total_paginas, textos) lidos da página pública da Solides."""
@@ -834,12 +746,6 @@ def buscar_vagas_solides(conn, cursor):
                     else:
                         data_f = "Não informado"
 
-                    description_raw = _solides_descricao(textos, vaga.get('description'))
-                    description_limpa = limpar_html(description_raw) if description_raw else ''
-                    texto_para_match = f"{titulo} {description_limpa}"
-                    nivel_match, techs = calcular_match(texto_para_match)
-                    techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar descrição"
-
                     cidade_info = vaga.get('city') or {}
                     estado_info = vaga.get('state') or {}
                     local = f"{cidade_info.get('name') or ''} - {estado_info.get('code') or ''}".strip(" -")
@@ -855,11 +761,10 @@ def buscar_vagas_solides(conn, cursor):
                         f"🏢 <b>Empresa:</b> {html.escape(empresa)}\n"
                         f"📍 <b>Local:</b> {html.escape(local)}\n"
                         f"💻 <b>Modelo:</b> {modelo}\n"
-                        f"📅 <b>Data:</b> {data_f}\n"
-                        f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
+                        f"📅 <b>Data:</b> {data_f}\n\n"
                         f"🔗 <a href='{link}'>Aplicar na Solides</a>"
                     )
-                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "SOLIDES", nivel_match)
+                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "SOLIDES")
 
                 if pagina >= total_pages:
                     break

@@ -18,7 +18,6 @@ Bot que monitora vagas de emprego em múltiplas plataformas e envia alertas form
 - [Instalação e configuração](#-instalação-e-configuração)
 - [Guia de configuração detalhado](#-guia-de-configuração-detalhado)
 - [Configurando o GitHub Actions](#-configurando-o-github-actions)
-- [Score de match](#-score-de-match)
 - [Exemplo de alerta](#-exemplo-de-alerta)
 - [Créditos](#-créditos)
 
@@ -33,8 +32,6 @@ Varre Gupy + LinkedIn + ProgramaThor + Solides + InHire
     ↓
 Aplica filtros de perfil (termo obrigatório no título, empresas ignoradas)
     ↓
-Calcula score de match com a sua stack técnica
-    ↓
 Envia alertas formatados no Telegram
     ↓
 Salva histórico no banco SQLite (evita reenvio de vagas já vistas)
@@ -44,15 +41,14 @@ Salva histórico no banco SQLite (evita reenvio de vagas já vistas)
 
 ## 🔍 Fontes monitoradas
 
-| Fonte | Tipo de acesso | O que é analisado no match |
-|---|---|---|
-| 🟣 **Gupy** | API JSON | Título + descrição completa |
-| 🔷 **LinkedIn** | API Guest (sem login) | Título da vaga |
-| 🟤 **ProgramaThor** | Web Scraping | Título + tags de tecnologia do card |
-| 🟢 **Solides** | Página pública (dados Next.js) | Título + descrição completa |
-| 🟣 **InHire** | API JSON | Título da vaga |
+| Fonte | Tipo de acesso |
+|---|---|
+| 🟣 **Gupy** | API JSON |
+| 🔷 **LinkedIn** | API Guest (sem login) |
+| 🟤 **ProgramaThor** | Web Scraping |
+| 🟢 **Solides** | Página pública (dados Next.js) |
+| 🟣 **InHire** | API JSON |
 
-> **Atenção:** para LinkedIn e InHire, tecnologias mencionadas somente na descrição da vaga **não são detectadas** pelo score de match — apenas o título é analisado.
 
 ---
 
@@ -115,7 +111,7 @@ python main.py
 
 ## 🛠️ Guia de configuração detalhado
 
-Abra o `main.py`. Logo após os imports, você encontrará a seção de configuração dividida em três partes: **A. Buscas**, **B. Perfil** e **C. Minha Stack**.
+Abra o `main.py`. Logo após os imports, você encontrará a seção de configuração dividida em duas partes: **A. Buscas** e **B. Perfil**.
 
 ---
 
@@ -276,33 +272,6 @@ EMPRESAS_IGNORADAS = [
 
 ---
 
-### C. Minha Stack — tecnologias para o score de match
-
-Liste todas as tecnologias que você domina. O bot usa essa lista para calcular o score de compatibilidade de cada vaga.
-
-```python
-MINHA_STACK = [
-    "flutter", "dart", "firebase", "clean architecture",
-    "bloc", "riverpod", "rest api", "graphql",
-    # Adicione suas tecnologias aqui
-]
-```
-
-#### Como funciona o score
-
-O bot conta quantos itens de `MINHA_STACK` foram encontrados no texto da vaga:
-
-| Itens encontrados | Nível | Indicador |
-|---|---|---|
-| 0 | Baixo | 🔴 |
-| 1 | Padrão | 🔵 |
-| 2 | Médio | 🟡 |
-| 3 ou mais | Alto | 🟢 |
-
-> **Dica:** quanto mais específica for sua stack, mais preciso será o match. Prefira termos exatos como `"clean architecture"` em vez de só `"architecture"`.
-
----
-
 ## 🤖 Configurando o GitHub Actions
 
 O bot roda via GitHub Actions. O agendamento principal é feito por um Cloudflare Worker, e o workflow tem um agendamento de reserva com poucos horários.
@@ -335,21 +304,6 @@ Em um fork, sem o Worker, o bot roda só nos horários de reserva. Para ter o ag
 
 ---
 
-## 📊 Score de match
-
-O score é calculado contando quantos termos de `MINHA_STACK` aparecem, como palavra inteira, no texto analisado de cada vaga. Antes disso, vagas sem `TERMO_OBRIGATORIO_TITULO` ("flutter") no título são descartadas. O texto analisado varia por fonte:
-
-| Fonte | Texto analisado |
-|---|---|
-| Gupy | Título + descrição completa |
-| LinkedIn | Título da vaga |
-| LinkedIn (publicações) | Autor + trecho da publicação |
-| InHire | Título da vaga |
-| ProgramaThor | Título + tags de tecnologia do card |
-| Solides | Título + descrição completa (HTML limpo) |
-
----
-
 ## 📸 Exemplo de alerta
 
 ```
@@ -362,7 +316,6 @@ O score é calculado contando quantos termos de `MINHA_STACK` aparecem, como pal
 📄 Tipo: Efetivo
 ♿ PCD: Não informado
 📅 Data: 12/06/2026 às 09:15
-📊 Match: 🟢 Alto · FLUTTER · DART · CLEAN ARCHITECTURE · FIREBASE
 
 🔗 Aplicar na Gupy
 ```
