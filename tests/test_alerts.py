@@ -94,6 +94,18 @@ class RegistrarEEnviarTest(AlertTestCase):
         self.assertEqual(self.saved_links(), ["https://x/1"])
         self.sleep.assert_called_once_with(main.PAUSA_ENTRE_VAGAS)
 
+    def test_same_job_from_another_source_is_not_sent_on_the_next_run(self):
+        self.send("https://gupy/1")
+        self.send("https://linkedin/1")  # same title and company, other source
+        self.assertEqual(self.telegram.call_count, 1)
+        self.assertCountEqual(self.saved_links(), ["https://gupy/1", "https://linkedin/1"])
+
+        main._enviados_sessao.clear()  # next run
+        for link in ("https://gupy/1", "https://linkedin/1"):
+            if not main.ja_enviada(self.cursor, link):
+                self.send(link)
+        self.assertEqual(self.telegram.call_count, 1)
+
     def test_refused_job_is_not_saved_so_next_run_retries(self):
         self.telegram.return_value = False
         self.send()
@@ -202,6 +214,18 @@ class SourceErrorsTest(AlertTestCase):
         message = self.telegram.call_args.args[0]
         self.assertIn("Dev Flutter &lt;Pleno&gt; &amp; Mobile", message)
         self.assertIn("href='https://acme.gupy.io/jobs/1?a=1&amp;b=2'", message)
+
+    def test_gupy_pages_advance_by_the_configured_limit(self):
+        now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        page = lambda n: response(json_data={"data": [
+            {"jobUrl": f"https://acme.gupy.io/jobs/{n}", "name": f"Dev Flutter {n}", "careerPageName": "Acme",
+             "publishedDate": now}]})
+        with mock.patch.object(main, "FILTROS_GUPY", [{"nome": "FLUTTER", "params": {"limit": 15}}]), \
+             mock.patch.object(main.requests, "get",
+                               side_effect=[page(1), page(2), response(json_data={"data": []})]) as get:
+            main.buscar_vagas_gupy(self.conn, self.cursor)
+        offsets = [call.kwargs["params"]["offset"] for call in get.call_args_list]
+        self.assertEqual(offsets, [0, 15, 30])
 
     def test_linkedin_waits_and_retries_once_when_limited(self):
         with mock.patch.object(main, "FILTROS_LINKEDIN", [{"nome": "FLUTTER", "params": {}}]), \
