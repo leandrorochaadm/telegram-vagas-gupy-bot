@@ -52,9 +52,26 @@ class SearchYahooTest(unittest.TestCase):
         ]
         with mock.patch.object(inhire_discovery, "YAHOO_PAGES", 3), \
                 mock.patch.object(inhire_discovery.requests, "get", side_effect=pages) as get:
-            tenants = inhire_discovery.search_yahoo("site:inhire.app vagas")
+            tenants, answered = inhire_discovery.search_yahoo("site:inhire.app vagas")
         self.assertEqual(tenants, {"acme", "beta"})
+        self.assertTrue(answered)
         self.assertEqual([c.kwargs["params"]["b"] for c in get.call_args_list], [1, 8, 15])
+
+    def test_network_error_on_one_page_keeps_other_pages(self, _sleep):
+        pages = [
+            response(text="https://acme.inhire.app"),
+            inhire_discovery.requests.ConnectionError("reset"),
+            response(text="https://beta.inhire.app"),
+        ]
+        with mock.patch.object(inhire_discovery, "YAHOO_PAGES", 3), \
+                mock.patch.object(inhire_discovery.requests, "get", side_effect=pages):
+            self.assertEqual(inhire_discovery.search_yahoo("q"), ({"acme", "beta"}, True))
+
+    def test_not_answered_when_every_page_fails(self, _sleep):
+        pages = [response(status=500), inhire_discovery.requests.Timeout("slow")]
+        with mock.patch.object(inhire_discovery, "YAHOO_PAGES", 2), \
+                mock.patch.object(inhire_discovery.requests, "get", side_effect=pages):
+            self.assertEqual(inhire_discovery.search_yahoo("q"), (set(), False))
 
 
 @mock.patch.object(inhire_discovery.time, "sleep")
@@ -67,15 +84,28 @@ class SearchBraveTest(unittest.TestCase):
                                 "query": {"more_results_available": False}}),
         ]
         with mock.patch.object(inhire_discovery.requests, "get", side_effect=pages) as get:
-            tenants = inhire_discovery.search_brave("key", "site:inhire.app vagas")
-        self.assertEqual(tenants, {"acme", "beta"})
+            self.assertEqual(inhire_discovery.search_brave("key", "q"), ({"acme", "beta"}, None))
         self.assertEqual(get.call_count, 2)
         self.assertNotIn("freshness", get.call_args.kwargs["params"])
 
-    def test_stops_on_http_error(self, _sleep):
-        with mock.patch.object(inhire_discovery.requests, "get", return_value=response(status=429)) as get:
-            self.assertEqual(inhire_discovery.search_brave("key", "q"), set())
-        self.assertEqual(get.call_count, 1)
+    def test_http_error_keeps_earlier_pages(self, _sleep):
+        pages = [
+            response(json_data={"web": {"results": [{"url": "https://acme.inhire.app/"}]},
+                                "query": {"more_results_available": True}}),
+            response(status=429),
+        ]
+        with mock.patch.object(inhire_discovery.requests, "get", side_effect=pages) as get:
+            self.assertEqual(inhire_discovery.search_brave("key", "q"), ({"acme"}, "código 429"))
+        self.assertEqual(get.call_count, 2)
+
+    def test_network_error(self, _sleep):
+        error = inhire_discovery.requests.ConnectionError("down")
+        with mock.patch.object(inhire_discovery.requests, "get", side_effect=error):
+            self.assertEqual(inhire_discovery.search_brave("key", "q"), (set(), "sem resposta"))
+
+
+def yahoo_ok(*tenants):
+    return set(tenants), True
 
 
 class DiscoverTest(unittest.TestCase):
@@ -86,50 +116,73 @@ class DiscoverTest(unittest.TestCase):
     def tearDown(self):
         self.conn.close()
 
-    def discover(self, brave_api_key=None, queries=("q1", "q2")):
+    def discover(self, brave_api_key=None, queries=("q1", "q2"), errors=None):
         return inhire_discovery.discover(
             self.conn, self.cursor, queries=list(queries), brave_api_key=brave_api_key, every=WEEK,
+            errors=errors,
         )
 
+    def age_last_run(self, delta):
+        self.cursor.execute("UPDATE inhire_discovery SET last_run = ?", ((datetime.now() - delta).isoformat(),))
+
     def test_saves_tenants_from_every_query(self):
-        with mock.patch.object(inhire_discovery, "search_yahoo", side_effect=[{"acme"}, {"beta", "acme"}]):
+        with mock.patch.object(inhire_discovery, "search_yahoo",
+                               side_effect=[yahoo_ok("acme"), yahoo_ok("beta", "acme")]):
             self.assertEqual(self.discover(), ["acme", "beta"])
 
     def test_uses_brave_only_with_api_key(self):
-        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=set()), \
-                mock.patch.object(inhire_discovery, "search_brave", return_value={"gamma"}) as brave:
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok()), \
+                mock.patch.object(inhire_discovery, "search_brave", return_value=({"gamma"}, None)) as brave:
             self.discover(queries=["q1"])
             brave.assert_not_called()
+            self.age_last_run(inhire_discovery.RETRY_AFTER)
             self.assertEqual(self.discover(brave_api_key="key", queries=["q1"]), ["gamma"])
             brave.assert_called_once_with("key", "q1")
 
     def test_skips_search_until_interval_passes(self):
-        with mock.patch.object(inhire_discovery, "search_yahoo", return_value={"acme"}) as yahoo:
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("acme")) as yahoo:
             self.discover()
             yahoo.reset_mock()
             self.assertEqual(self.discover(), ["acme"])
             yahoo.assert_not_called()
 
     def test_keeps_old_tenants_on_new_run(self):
-        with mock.patch.object(inhire_discovery, "search_yahoo", return_value={"acme"}):
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("acme")):
             self.discover()
-        self.cursor.execute("UPDATE inhire_discovery SET last_run = ?",
-                            ((datetime.now() - WEEK).isoformat(),))
-        with mock.patch.object(inhire_discovery, "search_yahoo", return_value={"beta"}):
+        self.age_last_run(WEEK)
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("beta")):
             self.assertEqual(self.discover(), ["acme", "beta"])
 
-    def test_retries_next_run_when_nothing_found(self):
-        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=set()):
-            self.discover()
+    def test_retries_after_a_day_when_nothing_found(self):
+        errors = []
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok()):
+            self.discover(errors=errors)
+        self.assertEqual(len(errors), 1)
+        self.assertFalse(inhire_discovery.discovery_due(self.cursor, WEEK))
+        self.age_last_run(inhire_discovery.RETRY_AFTER)
         self.assertTrue(inhire_discovery.discovery_due(self.cursor, WEEK))
 
-    def test_search_error_does_not_stop_other_queries(self):
-        error = inhire_discovery.requests.RequestException("timeout")
-        with mock.patch.object(inhire_discovery, "search_yahoo", side_effect=[error, {"beta"}]):
-            self.assertEqual(self.discover(), ["beta"])
+    def test_failed_queries_become_one_line_per_source(self):
+        errors = []
+        with mock.patch.object(inhire_discovery, "search_yahoo",
+                               side_effect=[(set(), False), (set(), False), yahoo_ok("acme")]), \
+                mock.patch.object(inhire_discovery, "search_brave",
+                                  side_effect=[(set(), "código 429"), (set(), "código 429"), (set(), None)]):
+            self.assertEqual(self.discover(brave_api_key="key", queries=["q1", "q2", "q3"], errors=errors), ["acme"])
+        self.assertEqual(errors, [
+            "O Yahoo não respondeu a 2 de 3 buscas.",
+            "A Brave falhou em 2 de 3 buscas (código 429).",
+        ])
+
+    def test_adds_found_column_to_old_table(self):
+        self.cursor.execute("CREATE TABLE inhire_discovery (last_run TEXT)")
+        self.cursor.execute("INSERT INTO inhire_discovery VALUES (?)", (datetime.now().isoformat(),))
+        with mock.patch.object(inhire_discovery, "search_yahoo") as yahoo:
+            self.discover()
+        yahoo.assert_not_called()
 
     def test_remove_tenant(self):
-        with mock.patch.object(inhire_discovery, "search_yahoo", return_value={"acme", "beta"}):
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("acme", "beta")):
             self.discover(queries=["q1"])
         inhire_discovery.remove_tenant(self.conn, self.cursor, "acme")
         self.assertEqual(inhire_discovery.load_tenants(self.cursor), ["beta"])

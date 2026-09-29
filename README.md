@@ -251,6 +251,10 @@ USAR_BRAVE_DESCOBERTA_INHIRE = False  # Brave: mais empresas, mas gasta cota
 
 A busca de vagas continua em toda execução; só a descoberta respeita o intervalo. Com a Brave ativa, cada termo gasta até 10 consultas da cota por descoberta.
 
+Se a descoberta não achar nenhuma empresa (site de busca bloqueou), o bot tenta de novo no dia seguinte, e não em toda execução.
+
+**Aviso de erros no Telegram:** problemas na varredura da InHire chegam ao grupo numa mensagem só, no fim da execução — busca que falhou, cota da Brave esgotada, empresas que não responderam (cada uma é consultada duas vezes antes de contar como erro). `LIMITE_EMPRESAS_NO_AVISO` limita quantas empresas aparecem nessa mensagem. Uma empresa só é apagada do banco quando a InHire responde que ela não existe, e no máximo `MAX_REMOCOES_INHIRE` por execução: acima disso, é mais provável uma mudança na InHire, então nada é apagado e chega um aviso.
+
 ---
 
 #### `FILTROS_SOLIDES`

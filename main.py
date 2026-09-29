@@ -146,6 +146,15 @@ DIAS_DESCOBERTA_INHIRE = 7
 # Brave acha mais empresas, mas gasta até 10 consultas da cota por termo a cada
 # descoberta (20 termos ≈ 800 consultas/mês). Requer BRAVE_API_KEY.
 USAR_BRAVE_DESCOBERTA_INHIRE = False
+# Problemas na varredura da Inhire são avisados no Telegram numa mensagem só.
+# Máximo de empresas citadas nesse aviso (o resto vira "e mais N").
+LIMITE_EMPRESAS_NO_AVISO = 10
+# Segundos de espera antes de repetir uma consulta que falhou na Inhire.
+PAUSA_NOVA_TENTATIVA_INHIRE = 2
+# Máximo de empresas apagadas numa execução quando a Inhire diz que não existem.
+# Se passar disso, é mais provável uma mudança na Inhire do que empresas saindo:
+# nada é apagado e chega um aviso no Telegram.
+MAX_REMOCOES_INHIRE = 10
 
 # Solides: busca pela página pública vagas.solides.com.br/vagas/<modalidade>/<termo>.
 # 'caminho' = "<modalidade>/<termo>". A modalidade no caminho já filtra as vagas
@@ -589,7 +598,34 @@ def buscar_posts_linkedin(conn, cursor):
 
 def buscar_vagas_inhire(conn, cursor):
     print("\n🟣 INHIRE — iniciando varredura...")
+    erros = []
+    try:
+        _varrer_inhire(conn, cursor, erros)
+    except Exception as e:
+        print(f"   ❌ Varredura da Inhire interrompida: {e}")
+        erros.append(f"A varredura parou no meio por um erro inesperado: {e}")
+    if erros:
+        avisar_erros_inhire(erros)
 
+def avisar_erros_inhire(erros):
+    """Manda para o Telegram, numa mensagem só, os problemas da varredura da Inhire."""
+    itens = "\n".join(f"• {html.escape(erro)}" for erro in erros)
+    enviar_telegram(f"⚠️ <b>INHIRE — problemas na varredura</b>\n\n{itens}")
+
+def _get_inhire(url, headers):
+    """GET na API da Inhire com uma nova tentativa: ela às vezes falha e volta logo em seguida."""
+    for tentativa in range(2):
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+        except requests.RequestException:
+            if tentativa == 1:
+                raise
+        else:
+            if resp.status_code == 200 or "Tenant not found" in resp.text or tentativa == 1:
+                return resp
+        time.sleep(PAUSA_NOVA_TENTATIVA_INHIRE)
+
+def _varrer_inhire(conn, cursor, erros):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     }
@@ -600,22 +636,27 @@ def buscar_vagas_inhire(conn, cursor):
         queries=TERMOS_DESCOBERTA_INHIRE,
         brave_api_key=BRAVE_API_KEY if USAR_BRAVE_DESCOBERTA_INHIRE else None,
         every=timedelta(days=DIAS_DESCOBERTA_INHIRE),
+        errors=erros,
     )
     print(f"   📋 {len(empresas)} empresas para verificar")
+    sem_resposta = []
+    inexistentes = []
 
     for empresa_slug in empresas:
         print(f"\n   🏢 {empresa_slug.upper()}...")
         headers['X-Tenant'] = empresa_slug
         
         try:
-            resp = requests.get(url_base, headers=headers, timeout=15)
-            if resp.status_code == 404:
-                # Subdomínio que não é (ou deixou de ser) empresa da Inhire
-                print("   🗑️  Empresa não existe na Inhire — removida da lista")
-                inhire_discovery.remove_tenant(conn, cursor, empresa_slug)
+            resp = _get_inhire(url_base, headers)
+            # Só conta com a resposta exata da Inhire: um 404 genérico (API fora
+            # do ar ou endereço mudado) não quer dizer que a empresa saiu
+            if resp.status_code == 404 and "Tenant not found" in resp.text:
+                print("   🗑️  Empresa não existe na Inhire")
+                inexistentes.append(empresa_slug)
                 continue
             if resp.status_code != 200:
                 print(f"   🛑 HTTP {resp.status_code}")
+                sem_resposta.append(f"{empresa_slug} ({resp.status_code})")
                 continue
                 
             dados = resp.json()
@@ -672,8 +713,29 @@ def buscar_vagas_inhire(conn, cursor):
                     )
                     registrar_e_enviar(conn, cursor, link, titulo, nome_empresa, data_f, mensagem, "INHIRE")
                     
+        except requests.RequestException as e:
+            print(f"   ⚠️  Inhire não respondeu para {empresa_slug}: {e}")
+            sem_resposta.append(f"{empresa_slug} (sem resposta)")
         except Exception as e:
-            print(f"   ⚠️  Erro ao buscar {empresa_slug}: {e}")
+            print(f"   ⚠️  Erro ao ler vagas de {empresa_slug}: {e}")
+            sem_resposta.append(f"{empresa_slug} (erro ao ler)")
+
+    # Apaga no fim, e só se forem poucas: muitas de uma vez indica mudança na
+    # Inhire, e apagar esvaziaria o banco
+    if len(inexistentes) > MAX_REMOCOES_INHIRE:
+        erros.append(f"A Inhire disse que {len(inexistentes)} de {len(empresas)} empresas não existem. "
+                     "Parece uma mudança na Inhire, então nenhuma foi apagada.")
+    else:
+        for empresa_slug in inexistentes:
+            inhire_discovery.remove_tenant(conn, cursor, empresa_slug)
+        if inexistentes:
+            print(f"   🗑️  {len(inexistentes)} empresas removidas da lista: {', '.join(inexistentes)}")
+
+    if sem_resposta:
+        lista = ", ".join(sem_resposta[:LIMITE_EMPRESAS_NO_AVISO])
+        if len(sem_resposta) > LIMITE_EMPRESAS_NO_AVISO:
+            lista += f" e mais {len(sem_resposta) - LIMITE_EMPRESAS_NO_AVISO}"
+        erros.append(f"{len(sem_resposta)} de {len(empresas)} empresas não responderam: {lista}.")
 
 # --- 8. SOLIDES ---
 
