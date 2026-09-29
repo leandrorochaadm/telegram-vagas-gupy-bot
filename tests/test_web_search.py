@@ -109,6 +109,14 @@ class SearchWebTest(unittest.TestCase):
         get.return_value = brave_response([], status=429)
         self.assertEqual(web_search.search_web("key", "flutter vaga"), [])
 
+    @mock.patch("web_search.time.sleep")
+    @mock.patch("web_search.requests.get")
+    def test_http_error_is_reported(self, get, _sleep):
+        get.return_value = brave_response([], status=429)
+        errors = []
+        web_search.search_web("key", "flutter vaga", errors=errors)
+        self.assertEqual(errors, ["código 429"])
+
 
 class SearchJobsTest(unittest.TestCase):
 
@@ -118,9 +126,9 @@ class SearchJobsTest(unittest.TestCase):
         self.cursor.execute("CREATE TABLE vagas_enviadas (link TEXT PRIMARY KEY, data_publicacao TEXT, titulo TEXT)")
         self.send = mock.Mock()
 
-    def run_with(self, results, api_key="key", ignored_companies=()):
+    def run_with(self, results, api_key="key", ignored_companies=(), errors=None, search_error=None):
         pages = [web_search.parse_web_result(r) for r in results]
-        with mock.patch.object(web_search, "search_web", return_value=pages) as search:
+        with mock.patch.object(web_search, "search_web", return_value=pages, side_effect=search_error) as search:
             web_search.search_jobs(
                 self.conn, self.cursor,
                 api_key=api_key,
@@ -130,8 +138,23 @@ class SearchJobsTest(unittest.TestCase):
                 required_terms=[["flutter"], ["vaga"], ["remoto", "remota"]],
                 ignored_companies=list(ignored_companies),
                 send=self.send,
+                errors=errors,
             )
         return search
+
+    def test_brave_refusal_becomes_alert_sentence(self):
+        def refuse(*args, errors):
+            errors.append("código 429")
+            return []
+        errors = []
+        self.run_with([], errors=errors, search_error=refuse)
+        self.assertEqual(errors, ["FLUTTER: a Brave recusou a busca (código 429)."])
+
+    def test_network_error_becomes_alert_sentence(self):
+        errors = []
+        self.run_with([], errors=errors, search_error=web_search.requests.ConnectionError("down"))
+        self.assertEqual(errors, ["FLUTTER: a Brave não respondeu."])
+        self.send.assert_not_called()
 
     def test_sends_page_with_site_and_link(self):
         self.run_with([brave_result()])

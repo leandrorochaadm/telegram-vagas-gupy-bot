@@ -19,6 +19,7 @@ Bot que monitora vagas de emprego em múltiplas plataformas e envia alertas form
 - [Guia de configuração detalhado](#-guia-de-configuração-detalhado)
 - [Configurando o GitHub Actions](#-configurando-o-github-actions)
 - [Exemplo de alerta](#-exemplo-de-alerta)
+- [Avisos de erro](#avisos-de-erro)
 - [Créditos](#-créditos)
 
 ---
@@ -253,7 +254,7 @@ A busca de vagas continua em toda execução; só a descoberta respeita o interv
 
 Se a descoberta não achar nenhuma empresa (site de busca bloqueou), o bot tenta de novo no dia seguinte, e não em toda execução.
 
-**Aviso de erros no Telegram:** problemas na varredura da InHire chegam ao grupo numa mensagem só, no fim da execução — busca que falhou, cota da Brave esgotada, empresas que não responderam (cada uma é consultada duas vezes antes de contar como erro). `LIMITE_EMPRESAS_NO_AVISO` limita quantas empresas aparecem nessa mensagem. Uma empresa só é apagada do banco quando a InHire responde que ela não existe, e no máximo `MAX_REMOCOES_INHIRE` por execução: acima disso, é mais provável uma mudança na InHire, então nada é apagado e chega um aviso.
+**Aviso de erros no Telegram:** problemas na varredura da InHire entram no aviso de erros — busca que falhou, cota da Brave esgotada, empresas que não responderam (cada uma é consultada duas vezes antes de contar como erro). `LIMITE_ITENS_NO_AVISO` limita quantas empresas aparecem nele (veja [Avisos de erro](#avisos-de-erro)). Uma empresa só é apagada do banco quando a InHire responde que ela não existe, e no máximo `MAX_REMOCOES_INHIRE` por execução: acima disso, é mais provável uma mudança na InHire, então nada é apagado e chega um aviso.
 
 ---
 
@@ -349,6 +350,31 @@ Em um fork, sem o Worker, o bot roda só nos horários de reserva. Para ter o ag
 
 🔗 Aplicar na Gupy
 ```
+
+### Avisos de erro
+
+Quando algo dá errado, o bot avisa no próprio grupo. Os problemas de todas as fontes vão **numa mensagem só**, no fim da execução, e no máximo **uma a cada 20 minutos** (`INTERVALO_AVISOS_MIN`). O que acontecer dentro do intervalo fica guardado no banco e vai junto no próximo aviso. Problema repetido aparece uma vez, com a contagem, como "(3x)".
+
+O que entra no aviso:
+
+- **Busca recusada ou sem resposta** em qualquer fonte (Gupy, ProgramaThor, LinkedIn, InHire, Solides, web). Ex.: página da Solides que mudou de formato. Quando o LinkedIn pede uma pausa (excesso de buscas), o bot espera `PAUSA_NOVA_TENTATIVA_LINKEDIN` segundos e tenta de novo antes de avisar.
+- **Cota da Brave esgotada** nas publicações do LinkedIn e na busca na web.
+- **Erro inesperado**: a fonte para e as outras continuam rodando.
+- **Vagas que o Telegram não entregou**: não ficam marcadas como enviadas e voltam na próxima execução. Quando o Telegram pede para esperar (limite de 20 mensagens por minuto num grupo), o bot espera e tenta de novo; entre uma vaga e outra ele já espera `PAUSA_ENTRE_VAGAS` segundos.
+- **beautifulsoup4 não instalado**: ProgramaThor e LinkedIn ficam desligados.
+- **Banco de vagas que não abre**: nenhuma busca é feita e o aviso sai na hora.
+
+```
+⚠️ Problemas na varredura
+
+LINKEDIN
+• FLUTTER · REMOTO: o LinkedIn recusou a busca (429). (2x)
+
+SOLIDES
+• FLUTTER · REMOTO: a página mudou de formato e o bot não conseguiu ler as vagas.
+```
+
+`LIMITE_ITENS_NO_AVISO` limita quantos itens (empresas, vagas) aparecem em cada linha do aviso.
 
 ---
 

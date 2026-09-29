@@ -53,8 +53,12 @@ def parse_web_result(result: dict, now: datetime | None = None, excluded_sites: 
     }
 
 
-def search_web(api_key: str, query: str, pages: int = 1, excluded_sites: list[str] = ()) -> list[dict]:
-    """Search pages from the past 24h matching `query`, on any site but `excluded_sites`."""
+def search_web(api_key: str, query: str, pages: int = 1, excluded_sites: list[str] = (),
+               errors: list[str] | None = None) -> list[dict]:
+    """Search pages from the past 24h matching `query`, on any site but `excluded_sites`.
+
+    When Brave refuses a page, the reason ("código 429") is appended to `errors`.
+    """
     headers = {"Accept": "application/json", "X-Subscription-Token": api_key}
     items: list[dict] = []
     for offset in range(min(pages, MAX_OFFSET + 1)):
@@ -64,6 +68,8 @@ def search_web(api_key: str, query: str, pages: int = 1, excluded_sites: list[st
         time.sleep(REQUEST_INTERVAL)
         if resp.status_code != 200:
             print(f"   🛑 Brave HTTP {resp.status_code}: {resp.text[:120]}")
+            if errors is not None:
+                errors.append(f"código {resp.status_code}")
             break
         data = resp.json()
         results = data.get("web", {}).get("results", [])
@@ -84,13 +90,16 @@ def _already_sent(cursor, link: str) -> bool:
     return cursor.fetchone() is not None
 
 
-def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, required_terms, ignored_companies, send) -> None:
+def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, required_terms, ignored_companies, send,
+                errors: list[str] | None = None) -> None:
     """Run every filter and send the relevant, unseen pages.
 
     excluded_sites: domains left out of the search (e.g. "linkedin.com", already covered elsewhere).
     required_terms: groups of words; the text needs at least one word of each group.
     send: main.registrar_e_enviar(conn, cursor, link, title, company, date, message, source).
+    errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
+    errors = [] if errors is None else errors
     if not api_key:
         print("\n⚠️  Busca na web desativada: defina BRAVE_API_KEY no .env")
         return
@@ -101,11 +110,19 @@ def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, requir
 
     for web_filter in filters:
         print(f"\n   🔎 {web_filter['nome']}...")
+        brave_errors: list[str] = []
         try:
-            found = search_web(api_key, web_filter["termo"], pages, excluded_sites)
+            found = search_web(api_key, web_filter["termo"], pages, excluded_sites, errors=brave_errors)
+        except requests.RequestException as e:
+            print(f"   ⚠️  Erro: {e}")
+            errors.append(f"{web_filter['nome']}: a Brave não respondeu.")
+            continue
         except Exception as e:
             print(f"   ⚠️  Erro: {e}")
+            errors.append(f"{web_filter['nome']}: erro ao ler as vagas ({e}).")
             continue
+        # 429 = Brave monthly quota used up or too many requests
+        errors += [f"{web_filter['nome']}: a Brave recusou a busca ({reason})." for reason in brave_errors]
 
         for item in found:
             text, site, link = item["text"], item["author"], item["link"]

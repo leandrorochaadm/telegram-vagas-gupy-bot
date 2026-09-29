@@ -111,6 +111,14 @@ class SearchPostsTest(unittest.TestCase):
         get.return_value = brave_response([], status=429)
         self.assertEqual(linkedin_posts.search_posts("key", "flutter vaga"), [])
 
+    @mock.patch("linkedin_posts.time.sleep")
+    @mock.patch("linkedin_posts.requests.get")
+    def test_http_error_is_reported(self, get, _sleep):
+        get.return_value = brave_response([], status=429)
+        errors = []
+        linkedin_posts.search_posts("key", "flutter vaga", errors=errors)
+        self.assertEqual(errors, ["código 429"])
+
 
 class BuscarPostsLinkedinTest(unittest.TestCase):
 

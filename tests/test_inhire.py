@@ -46,6 +46,8 @@ class BuscarVagasInhireTest(unittest.TestCase):
             mock.patch.object(main.time, "sleep"),
         ]
         self.discover, self.telegram, self.send, _, _ = [p.start() for p in patches]
+        main._avisos.clear()
+        self.addCleanup(main._avisos.clear)
         for p in patches:
             self.addCleanup(p.stop)
 
@@ -55,6 +57,7 @@ class BuscarVagasInhireTest(unittest.TestCase):
     def scan(self, *responses):
         with mock.patch.object(main.requests, "get", side_effect=list(responses)):
             main.buscar_vagas_inhire(self.conn, self.cursor)
+        main.enviar_avisos(self.conn, self.cursor)
 
     def test_sends_matching_job_without_alert(self):
         self.scan(jobs_page(job()), jobs_page(job(title="Designer")))
@@ -102,7 +105,7 @@ class BuscarVagasInhireTest(unittest.TestCase):
         self.telegram.assert_not_called()
 
     def test_alert_lists_at_most_the_limit(self):
-        with mock.patch.object(main, "LIMITE_EMPRESAS_NO_AVISO", 1):
+        with mock.patch.object(main, "LIMITE_ITENS_NO_AVISO", 1):
             self.scan(*[response(500)] * 4)
         alert = self.telegram.call_args.args[0]
         self.assertIn("acme (500) e mais 1", alert)
@@ -133,6 +136,7 @@ class BuscarVagasInhireTest(unittest.TestCase):
     def test_unexpected_error_is_alerted_and_does_not_raise(self):
         self.discover.side_effect = sqlite3.OperationalError("database is locked")
         main.buscar_vagas_inhire(self.conn, self.cursor)
+        main.enviar_avisos(self.conn, self.cursor)
         self.assertIn("database is locked", self.telegram.call_args.args[0])
 
 

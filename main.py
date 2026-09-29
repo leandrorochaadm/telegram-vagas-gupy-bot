@@ -7,7 +7,7 @@ import sqlite3
 import requests
 import unicodedata
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import inhire_discovery
 import linkedin_posts
@@ -19,6 +19,8 @@ try:
 except ImportError:
     BS4_DISPONIVEL = False
     print("⚠️  beautifulsoup4 não instalado — LinkedIn desativado. Rode: pip install beautifulsoup4")
+
+AVISO_SEM_BS4 = "ProgramaThor e LinkedIn desligados: falta instalar o beautifulsoup4 (pip install beautifulsoup4)."
 
 # --- 1. CONFIG ---
 DIRETORIO_ATUAL = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +78,8 @@ FILTROS_LINKEDIN = [
     # {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile developer", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
 ]
 PAGINAS_LINKEDIN = 5  # a API guest devolve ~10 vagas por página
+# Quando o LinkedIn recusa por excesso de buscas (429), espera e tenta de novo uma vez.
+PAUSA_NOVA_TENTATIVA_LINKEDIN = 10
 
 # LinkedIn — publicações das últimas 24h (busca via Brave Search, requer BRAVE_API_KEY).
 # "termo" é pesquisado em site:linkedin.com/posts. Cada filtro × página = 1 consulta
@@ -146,15 +150,28 @@ DIAS_DESCOBERTA_INHIRE = 7
 # Brave acha mais empresas, mas gasta até 10 consultas da cota por termo a cada
 # descoberta (20 termos ≈ 800 consultas/mês). Requer BRAVE_API_KEY.
 USAR_BRAVE_DESCOBERTA_INHIRE = False
-# Problemas na varredura da Inhire são avisados no Telegram numa mensagem só.
-# Máximo de empresas citadas nesse aviso (o resto vira "e mais N").
-LIMITE_EMPRESAS_NO_AVISO = 10
+# Máximo de itens (empresas, vagas) citados numa linha do aviso de erros (o resto vira "e mais N").
+LIMITE_ITENS_NO_AVISO = 10
 # Segundos de espera antes de repetir uma consulta que falhou na Inhire.
 PAUSA_NOVA_TENTATIVA_INHIRE = 2
 # Máximo de empresas apagadas numa execução quando a Inhire diz que não existem.
 # Se passar disso, é mais provável uma mudança na Inhire do que empresas saindo:
 # nada é apagado e chega um aviso no Telegram.
 MAX_REMOCOES_INHIRE = 10
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AVISOS NO TELEGRAM
+# ──────────────────────────────────────────────────────────────────────────────
+# Os problemas de todas as fontes vão numa mensagem só, no fim da execução, e no
+# máximo uma a cada INTERVALO_AVISOS_MIN minutos. Dentro do intervalo eles ficam
+# guardados no banco e vão junto no próximo aviso.
+INTERVALO_AVISOS_MIN = 20
+# O Telegram aceita até 20 mensagens por minuto num grupo: 3s entre vagas respeita isso.
+PAUSA_ENTRE_VAGAS = 3
+# Quando o Telegram pede para esperar (limite de mensagens), espera até isso e tenta de novo.
+MAX_ESPERA_TELEGRAM = 60
+# O Telegram corta mensagens acima de 4096 caracteres: o aviso para antes disso.
+TAMANHO_MAX_AVISO = 3800
 
 # Solides: busca pela página pública vagas.solides.com.br/vagas/<modalidade>/<termo>.
 # 'caminho' = "<modalidade>/<termo>". A modalidade no caminho já filtra as vagas
@@ -252,12 +269,37 @@ def enviar_telegram(mensagem):
         "parse_mode":               "HTML",
         "disable_web_page_preview": True,
     }
+    for tentativa in range(2):
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json=payload, timeout=10)
+        except Exception as e:
+            print(f"❌ Erro Telegram: {e}")
+            return False
+        if r.status_code == 200:
+            return True
+        print(f"⚠️  Telegram recusou: {r.text}")
+        espera = _espera_pedida_telegram(r)
+        if tentativa == 1 or espera is None:
+            return False
+        print(f"   ⏳ Limite de mensagens do Telegram: esperando {espera}s")
+        time.sleep(espera)
+
+def _espera_pedida_telegram(resp):
+    """Segundos que o Telegram pede para esperar (429), ou None se não vale tentar de novo."""
+    if resp.status_code != 429:
+        return None
     try:
-        r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json=payload, timeout=10)
-        if r.status_code != 200:
-            print(f"⚠️  Telegram recusou: {r.text}")
-    except Exception as e:
-        print(f"❌ Erro Telegram: {e}")
+        espera = resp.json().get("parameters", {}).get("retry_after")
+    except ValueError:
+        return None
+    return espera if isinstance(espera, int) and espera <= MAX_ESPERA_TELEGRAM else None
+
+def escapar(valor):
+    """Texto seguro para o modo HTML do Telegram: "<" ou "&" num título fariam ele recusar a mensagem."""
+    return html.escape(str(valor))
+
+# Vagas que o Telegram não entregou nesta execução (avisadas no fim, em main)
+_falhas_envio = []
 
 def registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte):
     chave = _chave_sessao(titulo, empresa)
@@ -265,11 +307,100 @@ def registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fo
         print(f"   🔁 Duplicata (sessão): {titulo[:50]}")
         return
     _enviados_sessao.add(chave)
-    cursor.execute('INSERT OR IGNORE INTO vagas_enviadas VALUES (?, ?, ?)', (link, data_f, titulo))
+    # Só marca como enviada se chegou: senão a vaga se perderia sem ninguém ver
+    if enviar_telegram(mensagem):
+        cursor.execute('INSERT OR IGNORE INTO vagas_enviadas VALUES (?, ?, ?)', (link, data_f, titulo))
+        conn.commit()
+        print(f"   ✅ {titulo[:50]}...")
+    else:
+        _falhas_envio.append(f"{titulo[:60]} ({fonte})")
+    time.sleep(PAUSA_ENTRE_VAGAS)
+
+def resumir_lista(itens):
+    """Junta os itens numa linha, com no máximo LIMITE_ITENS_NO_AVISO (o resto vira "e mais N")."""
+    lista = ", ".join(itens[:LIMITE_ITENS_NO_AVISO])
+    if len(itens) > LIMITE_ITENS_NO_AVISO:
+        lista += f" e mais {len(itens) - LIMITE_ITENS_NO_AVISO}"
+    return lista
+
+# Problemas desta execução, na ordem em que aconteceram: (fonte, texto)
+_avisos = []
+
+def anotar_avisos(fonte, erros):
+    _avisos.extend((fonte, erro) for erro in erros)
+
+def varrer_com_aviso(fonte, varrer, conn, cursor):
+    """Roda varrer(conn, cursor, erros) sem deixar um erro derrubar as outras fontes.
+
+    Os problemas que ela anotar em `erros` (e um erro inesperado) vão para o
+    aviso único do fim da execução (enviar_avisos).
+    """
+    erros = []
+    try:
+        varrer(conn, cursor, erros)
+    except Exception as e:
+        print(f"   ❌ Varredura {fonte} interrompida: {e}")
+        erros.append(f"A varredura parou no meio por um erro inesperado: {e}")
+    anotar_avisos(fonte, erros)
+
+class FalhaFonte(RuntimeError):
+    """Falha de uma fonte já descrita numa frase curta, pronta para o aviso."""
+
+def descrever_falha(filtro, e):
+    """Frase curta para o aviso quando a busca de um filtro falha com exceção."""
+    if isinstance(e, requests.RequestException):
+        return f"{filtro}: o site não respondeu."
+    if isinstance(e, FalhaFonte):
+        return f"{filtro}: {e}."
+    return f"{filtro}: erro ao ler as vagas ({e})."
+
+def montar_aviso(avisos):
+    """Uma mensagem com os problemas agrupados por fonte; repetidos viram "(3x)"."""
+    por_fonte = {}
+    for fonte, texto in avisos:
+        contagem = por_fonte.setdefault(fonte, {})
+        contagem[texto] = contagem.get(texto, 0) + 1
+
+    mensagem = "⚠️ <b>Problemas na varredura</b>"
+    restantes = sum(len(contagem) for contagem in por_fonte.values())
+    for fonte, contagem in por_fonte.items():
+        bloco = f"\n\n<b>{escapar(fonte)}</b>"
+        for texto, vezes in contagem.items():
+            linha = f"\n• {escapar(texto)}" + (f" ({vezes}x)" if vezes > 1 else "")
+            if len(mensagem) + len(bloco) + len(linha) > TAMANHO_MAX_AVISO:
+                return mensagem + bloco + f"\n\n… e mais {restantes} problemas."
+            bloco += linha
+            restantes -= 1
+        mensagem += bloco
+    return mensagem
+
+def enviar_avisos(conn, cursor, agora=None):
+    """Manda os problemas guardados numa mensagem só, no máximo uma a cada INTERVALO_AVISOS_MIN.
+
+    Dentro do intervalo, ou se o Telegram falhar, eles ficam no banco e vão no próximo aviso.
+    """
+    # UTC: o banco vai para o repositório e roda tanto no GitHub (UTC) quanto
+    # localmente (horário de Brasília); hora local faria o intervalo errar em 3h
+    agora = agora or datetime.now(timezone.utc)
+    cursor.execute("CREATE TABLE IF NOT EXISTS avisos_pendentes (fonte TEXT, texto TEXT)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS avisos_enviados (enviado_em TEXT)")
+    cursor.executemany("INSERT INTO avisos_pendentes VALUES (?, ?)", _avisos)
     conn.commit()
-    enviar_telegram(mensagem)
-    print(f"   ✅ {titulo[:50]}...")
-    time.sleep(2)
+    # Só depois de gravados: se o banco falhar, main ainda manda estes direto
+    _avisos.clear()
+
+    pendentes = cursor.execute("SELECT fonte, texto FROM avisos_pendentes ORDER BY rowid").fetchall()
+    if not pendentes:
+        return
+    ultimo = cursor.execute("SELECT enviado_em FROM avisos_enviados").fetchone()
+    if ultimo and agora - datetime.fromisoformat(ultimo[0]) < timedelta(minutes=INTERVALO_AVISOS_MIN):
+        print(f"\n⏳ {len(pendentes)} problemas guardados para o próximo aviso (um a cada {INTERVALO_AVISOS_MIN} min)")
+        return
+    if enviar_telegram(montar_aviso(pendentes)):
+        cursor.execute("DELETE FROM avisos_pendentes")
+        cursor.execute("DELETE FROM avisos_enviados")
+        cursor.execute("INSERT INTO avisos_enviados VALUES (?)", (agora.isoformat(timespec="seconds"),))
+        conn.commit()
 
 def filtros_basicos(titulo, empresa=None):
     """Retorna (bloqueada, motivo) com os filtros de perfil."""
@@ -286,7 +417,9 @@ def filtros_basicos(titulo, empresa=None):
 
 def buscar_vagas_gupy(conn, cursor):
     print("\n🟣 GUPY — iniciando varredura...")
+    varrer_com_aviso("GUPY", _varrer_gupy, conn, cursor)
 
+def _varrer_gupy(conn, cursor, erros):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept':     'application/json, text/plain, */*',
@@ -307,6 +440,7 @@ def buscar_vagas_gupy(conn, cursor):
                 resp = requests.get(url_api, headers=headers, params=params, timeout=15)
                 if resp.status_code != 200:
                     print(f"   🛑 HTTP {resp.status_code}")
+                    erros.append(f"{filtro['nome']}: a Gupy recusou a busca ({resp.status_code}).")
                     break
 
                 dados = resp.json().get('data', [])
@@ -358,14 +492,14 @@ def buscar_vagas_gupy(conn, cursor):
 
                     mensagem = (
                         f"🟣 <b>GUPY — {filtro['nome']}</b>\n\n"
-                        f"💼 <b>Vaga:</b> {titulo}\n"
-                        f"🏢 <b>Empresa:</b> {empresa}\n"
-                        f"📍 <b>Local:</b> {local}\n"
+                        f"💼 <b>Vaga:</b> {escapar(titulo)}\n"
+                        f"🏢 <b>Empresa:</b> {escapar(empresa)}\n"
+                        f"📍 <b>Local:</b> {escapar(local)}\n"
                         f"💻 <b>Modelo:</b> {modelo}\n"
                         f"📄 <b>Tipo:</b> {tipo}\n"
                         f"♿ <b>PCD:</b> {pcd}\n"
                         f"📅 <b>Data:</b> {data_f} às {hora_f}\n\n"
-                        f"🔗 <a href='{link}'>Aplicar na Gupy</a>"
+                        f"🔗 <a href='{escapar(link)}'>Aplicar na Gupy</a>"
                     )
                     registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "GUPY")
 
@@ -375,16 +509,19 @@ def buscar_vagas_gupy(conn, cursor):
 
             except Exception as e:
                 print(f"   ⚠️  Erro: {e}")
+                erros.append(descrever_falha(filtro['nome'], e))
                 break
 
 # --- 5. PROGRAMATHOR ---
 
 def buscar_vagas_programathor(conn, cursor):
-    if not BS4_DISPONIVEL:
-        print("\n⚠️  ProgramaThor desativado: instale beautifulsoup4")
-        return
-
     print("\n🟤 PROGRAMATHOR — iniciando varredura...")
+    varrer_com_aviso("PROGRAMATHOR", _varrer_programathor, conn, cursor)
+
+def _varrer_programathor(conn, cursor, erros):
+    if not BS4_DISPONIVEL:
+        print("   ⚠️  ProgramaThor desativado: instale beautifulsoup4")
+        return
 
     headers = {
         'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -407,6 +544,7 @@ def buscar_vagas_programathor(conn, cursor):
                 resp = requests.get(base_url, params=params, headers=headers, timeout=15)
                 if resp.status_code != 200:
                     print(f"   🛑 HTTP {resp.status_code}")
+                    erros.append(f"{filtro['nome']}: o ProgramaThor recusou a busca ({resp.status_code}).")
                     break
 
                 soup  = BeautifulSoup(resp.text, 'html.parser')
@@ -454,15 +592,15 @@ def buscar_vagas_programathor(conn, cursor):
 
                     mensagem = (
                         f"🟤 <b>PROGRAMATHOR — {filtro['nome']}</b>\n\n"
-                        f"💼 <b>Vaga:</b> {titulo}\n"
-                        f"🏢 <b>Empresa:</b> {empresa}\n"
-                        f"📍 <b>Local:</b> {local}\n"
-                        f"📄 <b>Nível:</b> {nivel}"
-                        + (f" · {tipo}" if tipo else "") + "\n"
-                        + (f"💰 <b>Salário:</b> {salario}\n" if salario else "")
-                        + (f"🛠️  <b>Stack:</b> <i>{tags_str}</i>\n" if tags_str else "")
+                        f"💼 <b>Vaga:</b> {escapar(titulo)}\n"
+                        f"🏢 <b>Empresa:</b> {escapar(empresa)}\n"
+                        f"📍 <b>Local:</b> {escapar(local)}\n"
+                        f"📄 <b>Nível:</b> {escapar(nivel)}"
+                        + (f" · {escapar(tipo)}" if tipo else "") + "\n"
+                        + (f"💰 <b>Salário:</b> {escapar(salario)}\n" if salario else "")
+                        + (f"🛠️  <b>Stack:</b> <i>{escapar(tags_str)}</i>\n" if tags_str else "")
                         + "\n"
-                        f"🔗 <a href='{link}'>Aplicar no ProgramaThor</a>"
+                        f"🔗 <a href='{escapar(link)}'>Aplicar no ProgramaThor</a>"
                     )
                     registrar_e_enviar(conn, cursor, link, titulo, empresa, datetime.now().strftime("%d/%m/%Y"), mensagem, "PROGRAMATHOR")
 
@@ -473,16 +611,19 @@ def buscar_vagas_programathor(conn, cursor):
 
             except Exception as e:
                 print(f"   ⚠️  Erro: {e}")
+                erros.append(descrever_falha(filtro['nome'], e))
                 break
 
 # --- 6. LINKEDIN ---
 
 def buscar_vagas_linkedin(conn, cursor):
-    if not BS4_DISPONIVEL:
-        print("\n⚠️  LinkedIn desativado: instale beautifulsoup4")
-        return
-
     print("\n🔷 LINKEDIN — iniciando varredura...")
+    varrer_com_aviso("LINKEDIN", _varrer_linkedin, conn, cursor)
+
+def _varrer_linkedin(conn, cursor, erros):
+    if not BS4_DISPONIVEL:
+        print("   ⚠️  LinkedIn desativado: instale beautifulsoup4")
+        return
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -496,8 +637,14 @@ def buscar_vagas_linkedin(conn, cursor):
             params["start"] = pagina * 10
             try:
                 resp = requests.get(url, params=params, headers=headers, timeout=15)
+                if resp.status_code == 429:
+                    # Excesso de buscas: o LinkedIn costuma liberar logo depois
+                    print(f"   ⏳ LinkedIn pediu uma pausa, nova tentativa em {PAUSA_NOVA_TENTATIVA_LINKEDIN}s")
+                    time.sleep(PAUSA_NOVA_TENTATIVA_LINKEDIN)
+                    resp = requests.get(url, params=params, headers=headers, timeout=15)
                 if resp.status_code != 200:
                     print(f"   🛑 HTTP {resp.status_code}")
+                    erros.append(f"{filtro['nome']}: o LinkedIn recusou a busca ({resp.status_code}).")
                     break
 
                 soup  = BeautifulSoup(resp.text, 'html.parser')
@@ -538,10 +685,10 @@ def buscar_vagas_linkedin(conn, cursor):
 
                     mensagem = (
                         f"🔷 <b>LINKEDIN — {filtro['nome']}</b>\n\n"
-                        f"💼 <b>Vaga:</b> {titulo}\n"
-                        f"🏢 <b>Empresa:</b> {empresa}\n"
+                        f"💼 <b>Vaga:</b> {escapar(titulo)}\n"
+                        f"🏢 <b>Empresa:</b> {escapar(empresa)}\n"
                         f"📅 <b>Data:</b> {data_f}\n\n"
-                        f"🔗 <a href='{link}'>Aplicar no LinkedIn</a>"
+                        f"🔗 <a href='{escapar(link)}'>Aplicar no LinkedIn</a>"
                     )
                     registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "LINKEDIN")
 
@@ -549,6 +696,7 @@ def buscar_vagas_linkedin(conn, cursor):
 
             except Exception as e:
                 print(f"   ⚠️  Erro: {e}")
+                erros.append(descrever_falha(filtro['nome'], e))
                 break
 
 # --- 6b. LINKEDIN (PUBLICAÇÕES) ---
@@ -559,14 +707,21 @@ def buscar_posts_linkedin(conn, cursor):
         return
 
     print("\n📝 LINKEDIN PUBLICAÇÕES — iniciando varredura...")
+    varrer_com_aviso("LINKEDIN PUBLICAÇÕES", _varrer_posts_linkedin, conn, cursor)
 
+def _varrer_posts_linkedin(conn, cursor, erros):
     for filtro in FILTROS_POSTS_LINKEDIN:
         print(f"\n   🔎 {filtro['nome']}...")
+        falhas_brave = []
         try:
-            posts = linkedin_posts.search_posts(BRAVE_API_KEY, filtro["termo"], PAGINAS_POSTS_LINKEDIN)
+            posts = linkedin_posts.search_posts(BRAVE_API_KEY, filtro["termo"], PAGINAS_POSTS_LINKEDIN,
+                                                errors=falhas_brave)
         except Exception as e:
             print(f"   ⚠️  Erro: {e}")
+            erros.append(descrever_falha(filtro['nome'], e))
             continue
+        # 429 = cota mensal da Brave esgotada ou buscas demais
+        erros += [f"{filtro['nome']}: a Brave recusou a busca ({falha})." for falha in falhas_brave]
 
         for post in posts:
             texto, autor, link = post["text"], post["author"], post["link"]
@@ -598,19 +753,7 @@ def buscar_posts_linkedin(conn, cursor):
 
 def buscar_vagas_inhire(conn, cursor):
     print("\n🟣 INHIRE — iniciando varredura...")
-    erros = []
-    try:
-        _varrer_inhire(conn, cursor, erros)
-    except Exception as e:
-        print(f"   ❌ Varredura da Inhire interrompida: {e}")
-        erros.append(f"A varredura parou no meio por um erro inesperado: {e}")
-    if erros:
-        avisar_erros_inhire(erros)
-
-def avisar_erros_inhire(erros):
-    """Manda para o Telegram, numa mensagem só, os problemas da varredura da Inhire."""
-    itens = "\n".join(f"• {html.escape(erro)}" for erro in erros)
-    enviar_telegram(f"⚠️ <b>INHIRE — problemas na varredura</b>\n\n{itens}")
+    varrer_com_aviso("INHIRE", _varrer_inhire, conn, cursor)
 
 def _get_inhire(url, headers):
     """GET na API da Inhire com uma nova tentativa: ela às vezes falha e volta logo em seguida."""
@@ -699,17 +842,17 @@ def _varrer_inhire(conn, cursor, erros):
                     if ja_enviada(cursor, link):
                         continue
                         
-                    local = job.get('location', 'Não informado')
+                    local = job.get('location') or 'Não informado'
                     data_f = datetime.now().strftime("%d/%m/%Y")
                     
                     mensagem = (
                         f"🟣 <b>INHIRE — {filtro['nome']}</b>\n\n"
-                        f"💼 <b>Vaga:</b> {titulo}\n"
-                        f"🏢 <b>Empresa:</b> {nome_empresa}\n"
-                        f"📍 <b>Local:</b> {local}\n"
+                        f"💼 <b>Vaga:</b> {escapar(titulo)}\n"
+                        f"🏢 <b>Empresa:</b> {escapar(nome_empresa)}\n"
+                        f"📍 <b>Local:</b> {escapar(local)}\n"
                         f"💻 <b>Modelo:</b> {modelo}\n"
                         f"📅 <b>Data (Descoberta):</b> {data_f}\n\n"
-                        f"🔗 <a href='{link}'>Aplicar na Inhire</a>"
+                        f"🔗 <a href='{escapar(link)}'>Aplicar na Inhire</a>"
                     )
                     registrar_e_enviar(conn, cursor, link, titulo, nome_empresa, data_f, mensagem, "INHIRE")
                     
@@ -732,10 +875,7 @@ def _varrer_inhire(conn, cursor, erros):
             print(f"   🗑️  {len(inexistentes)} empresas removidas da lista: {', '.join(inexistentes)}")
 
     if sem_resposta:
-        lista = ", ".join(sem_resposta[:LIMITE_EMPRESAS_NO_AVISO])
-        if len(sem_resposta) > LIMITE_EMPRESAS_NO_AVISO:
-            lista += f" e mais {len(sem_resposta) - LIMITE_EMPRESAS_NO_AVISO}"
-        erros.append(f"{len(sem_resposta)} de {len(empresas)} empresas não responderam: {lista}.")
+        erros.append(f"{len(sem_resposta)} de {len(empresas)} empresas não responderam: {resumir_lista(sem_resposta)}.")
 
 # --- 8. SOLIDES ---
 
@@ -777,17 +917,20 @@ def _solides_pagina(caminho, pagina, headers):
     url = f"https://vagas.solides.com.br/vagas/{caminho}"
     resp = requests.get(url, headers=headers, params={'page': pagina}, timeout=20)
     if resp.status_code != 200:
-        raise RuntimeError(f"HTTP {resp.status_code}")
+        raise FalhaFonte(f"o site recusou a busca ({resp.status_code})")
     flight = _solides_flight(resp.text)
     inicio = flight.find('"initialData":')
     if inicio == -1:
-        raise RuntimeError("initialData não encontrado na página (layout mudou?)")
+        # initialData sumiu: a página mudou de layout
+        raise FalhaFonte("a página mudou de formato e o bot não conseguiu ler as vagas")
     dados, _ = json.JSONDecoder().raw_decode(flight, inicio + len('"initialData":'))
     return dados.get('data', []), dados.get('totalPages', 1), _solides_textos(flight)
 
 def buscar_vagas_solides(conn, cursor):
     print("\n🟢 SOLIDES — iniciando varredura...")
+    varrer_com_aviso("SOLIDES", _varrer_solides, conn, cursor)
 
+def _varrer_solides(conn, cursor, erros):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     }
@@ -860,25 +1003,13 @@ def buscar_vagas_solides(conn, cursor):
 
             except Exception as e:
                 print(f"   ⚠️  Erro: {e}")
+                erros.append(descrever_falha(filtro['nome'], e))
                 break
 
 # --- MAIN ---
 
-def main():
-    if not TOKEN or not CHAT_ID:
-        print("❌ ERRO: Token do Telegram ou Chat ID não encontrados no arquivo .env!")
-        return
-
-    conn, cursor = iniciar_banco()
-
-    buscar_vagas_gupy(conn, cursor)
-    buscar_vagas_programathor(conn, cursor)
-    buscar_vagas_linkedin(conn, cursor)
-    buscar_posts_linkedin(conn, cursor)
-    buscar_vagas_inhire(conn, cursor)
-    buscar_vagas_solides(conn, cursor)
-    # Last: dedicated sources send richer messages for the same links
-    web_search.search_jobs(
+def buscar_vagas_web(conn, cursor):
+    varrer_com_aviso("WEB", lambda conn, cursor, erros: web_search.search_jobs(
         conn, cursor,
         api_key=BRAVE_API_KEY,
         filters=FILTROS_WEB,
@@ -887,7 +1018,49 @@ def main():
         required_terms=TERMOS_OBRIGATORIOS_POSTS,
         ignored_companies=EMPRESAS_IGNORADAS,
         send=registrar_e_enviar,
-    )
+        errors=erros,
+    ), conn, cursor)
+
+def anotar_falhas_envio():
+    """Anota no aviso as vagas que o Telegram não entregou nesta execução."""
+    if not _falhas_envio:
+        return
+    anotar_avisos("TELEGRAM", [
+        f"{len(_falhas_envio)} vagas não chegaram ao grupo: {resumir_lista(_falhas_envio)}. "
+        "Elas serão enviadas de novo na próxima execução."
+    ])
+
+def main():
+    if not TOKEN or not CHAT_ID:
+        print("❌ ERRO: Token do Telegram ou Chat ID não encontrados no arquivo .env!")
+        return
+
+    try:
+        conn, cursor = iniciar_banco()
+    except Exception as e:
+        print(f"❌ Erro ao abrir o banco: {e}")
+        # Sem banco não dá para guardar o aviso: vai direto
+        enviar_telegram(montar_aviso([("BOT", f"Não foi possível abrir o banco de vagas, nenhuma busca foi feita: {e}")]))
+        return
+
+    if not BS4_DISPONIVEL:
+        anotar_avisos("BOT", [AVISO_SEM_BS4])
+
+    buscar_vagas_gupy(conn, cursor)
+    buscar_vagas_programathor(conn, cursor)
+    buscar_vagas_linkedin(conn, cursor)
+    buscar_posts_linkedin(conn, cursor)
+    buscar_vagas_inhire(conn, cursor)
+    buscar_vagas_solides(conn, cursor)
+    # Last: dedicated sources send richer messages for the same links
+    buscar_vagas_web(conn, cursor)
+    anotar_falhas_envio()
+    try:
+        enviar_avisos(conn, cursor)
+    except Exception as e:
+        # Banco falhou ao guardar os avisos: manda os desta execução direto
+        print(f"❌ Erro ao guardar os avisos: {e}")
+        enviar_telegram(montar_aviso(_avisos + [("BOT", f"Não foi possível guardar os avisos no banco: {e}")]))
 
     conn.close()
     print("\n✅ Varredura completa de todas as fontes!")

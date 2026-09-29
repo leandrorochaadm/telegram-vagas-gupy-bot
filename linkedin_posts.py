@@ -67,8 +67,11 @@ def parse_result(result: dict, now: datetime | None = None) -> dict | None:
     }
 
 
-def search_posts(api_key: str, query: str, pages: int = 1) -> list[dict]:
-    """Search LinkedIn posts from the past 24h matching `query`."""
+def search_posts(api_key: str, query: str, pages: int = 1, errors: list[str] | None = None) -> list[dict]:
+    """Search LinkedIn posts from the past 24h matching `query`.
+
+    When Brave refuses a page, the reason ("código 429") is appended to `errors`.
+    """
     headers = {"Accept": "application/json", "X-Subscription-Token": api_key}
     posts: list[dict] = []
     for offset in range(min(pages, MAX_OFFSET + 1)):
@@ -84,6 +87,8 @@ def search_posts(api_key: str, query: str, pages: int = 1) -> list[dict]:
         time.sleep(REQUEST_INTERVAL)
         if resp.status_code != 200:
             print(f"   🛑 Brave HTTP {resp.status_code}: {resp.text[:120]}")
+            if errors is not None:
+                errors.append(f"código {resp.status_code}")
             break
         data = resp.json()
         results = data.get("web", {}).get("results", [])

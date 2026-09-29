@@ -99,12 +99,12 @@ class SolidesPageTest(unittest.TestCase):
 
     def test_page_raises_on_http_error(self):
         with mock.patch.object(main.requests, "get", return_value=self._response(403)):
-            with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
+            with self.assertRaisesRegex(main.FalhaFonte, r"o site recusou a busca \(403\)"):
                 main._solides_pagina("remoto/flutter", 1, {})
 
     def test_page_raises_when_layout_has_no_initial_data(self):
         with mock.patch.object(main.requests, "get", return_value=self._response(200, next_html('0:{"x":1}\n'))):
-            with self.assertRaisesRegex(RuntimeError, "initialData"):
+            with self.assertRaisesRegex(main.FalhaFonte, "mudou de formato"):
                 main._solides_pagina("remoto/flutter", 1, {})
 
 
@@ -115,11 +115,13 @@ class BuscarVagasSolidesTest(unittest.TestCase):
         self.cursor = self.conn.cursor()
         self.cursor.execute("CREATE TABLE vagas_enviadas (link TEXT PRIMARY KEY, data_publicacao TEXT, titulo TEXT)")
         main._enviados_sessao.clear()
+        main._avisos.clear()
+        self.addCleanup(main._avisos.clear)
         self.sent = []
         for target, value in [
             ("FILTROS_SOLIDES", [FILTER]),
             ("DIAS_BUSCA_SOLIDES", 20),
-            ("enviar_telegram", self.sent.append),
+            ("enviar_telegram", lambda message: self.sent.append(message) or True),
         ]:
             patcher = mock.patch.object(main, target, value)
             patcher.start()
@@ -204,9 +206,11 @@ class BuscarVagasSolidesTest(unittest.TestCase):
         self.assertEqual(pagina.call_count, 1)
 
     def test_page_error_stops_search_without_raising(self):
-        pagina = self.run_with_pages(RuntimeError("HTTP 403"))
+        pagina = self.run_with_pages(main.FalhaFonte("o site recusou a busca (403)"))
         self.assertEqual(pagina.call_count, 1)
+        self.assertEqual(self.saved_links(), [])
         self.assertEqual(self.sent, [])
+        self.assertEqual(main._avisos, [("SOLIDES", "FLUTTER · REMOTO: o site recusou a busca (403).")])
 
 
 if __name__ == "__main__":
