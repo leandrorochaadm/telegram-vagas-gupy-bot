@@ -43,6 +43,8 @@ TOKEN   = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID_GRUPO")
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
 # ════════════════════════════════════════════════════════════════════════════════
 # 2. CONFIGURAÇÕES DO USUÁRIO
 # Tudo que você precisa alterar para adaptar o bot ao seu perfil está aqui.
@@ -92,30 +94,44 @@ PAGINAS_POSTS_LINKEDIN = 1
 
 # Web toda — páginas das últimas 24h em qualquer site (blogs, portais de vagas,
 # sites de empresas...), também via Brave Search (código em web_search.py).
-# Usa TERMOS_OBRIGATORIOS_POSTS e EMPRESAS_IGNORADAS (comparado com o domínio).
+# Usa TERMOS_OBRIGATORIOS_WEB (abaixo) e EMPRESAS_IGNORADAS (comparado com o domínio).
 # Cada filtro × página também gasta 1 consulta da cota da Brave.
 FILTROS_WEB = [
-    {"nome": "FLUTTER · VAGA · REMOTO", "termo": "flutter vaga remoto OR remota"},
+    # Sem "vaga" nem OR: muitas páginas de vaga só trazem o cargo, e o OR da
+    # Brave separa o "flutter" do resto (vêm notícias de home office em geral)
+    {"nome": "FLUTTER · REMOTO", "termo": "flutter remoto"},
 ]
 PAGINAS_WEB = 1
 # Domínios fora da busca na web (subdomínios inclusos). O LinkedIn já tem
 # busca própria (vagas e publicações), então ficaria repetido.
 SITES_EXCLUIDOS_WEB = ["linkedin.com"]
+# Mesma regra de TERMOS_OBRIGATORIOS_POSTS, sem exigir "vaga": páginas de vaga
+# costumam ter só o cargo no título ("Desenvolvedor Flutter · Remoto").
+TERMOS_OBRIGATORIOS_WEB = [
+    ["flutter"],
+    ["remoto", "remota", "home office", "home-office", "homeoffice"],
+]
+# A página é descartada se tiver qualquer um destes termos (palavra inteira).
+# Atenção: "100% remoto, sem presencial" também cai fora.
+TERMOS_BLOQUEADOS_WEB = ["híbrido", "hibrido", "híbrida", "hibrida", "presencial"]
+# Até quantos dias atrás buscar. Na web quase nada sobre Flutter aparece em
+# 24h; uma vaga nunca é enviada duas vezes, então olhar a semana não repete.
+# A Brave só filtra por dia, semana, mês ou ano: 7 = última semana.
+DIAS_WEB = 7
 
 # A publicação só é enviada se o texto tiver ao menos um termo de CADA grupo
-# (palavra inteira, case-insensitive): flutter E vaga E (remoto OU remota).
+# (palavra inteira, case-insensitive): flutter E vaga(s) E (remoto OU remota).
 TERMOS_OBRIGATORIOS_POSTS = [
     ["flutter"],
-    ["vaga"],
+    ["vaga", "vagas"],
     ["remoto", "remota"],
 ]
 
-# Inhire: busca por termo no título + filtro de localização.
-# local_filtro válidos: 'remoto' | 'presencial'
+# Inhire: busca por termo no título. Só entram vagas remotas.
 # As empresas ficam na tabela inhire_tenants do banco (ver descoberta abaixo).
 FILTROS_INHIRE = [
-    {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
-    # {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
+    {"nome": "FLUTTER · REMOTO", "termo": "flutter"},
+    # {"nome": "MOBILE · REMOTO",  "termo": "mobile"},
 ]
 
 # Inhire — descoberta automática de empresas. A Inhire não publica a lista de
@@ -305,6 +321,10 @@ def registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fo
     chave = _chave_sessao(titulo, empresa)
     if chave in _enviados_sessao:
         print(f"   🔁 Duplicata (sessão): {titulo[:50]}")
+        # Mark this source's link as seen too: otherwise, on the next run, this
+        # source finds it unsent while the first one skips it, and it goes out twice
+        cursor.execute('INSERT OR IGNORE INTO vagas_enviadas VALUES (?, ?, ?)', (link, data_f, titulo))
+        conn.commit()
         return
     _enviados_sessao.add(chave)
     # Só marca como enviada se chegou: senão a vaga se perderia sem ninguém ver
@@ -421,7 +441,7 @@ def buscar_vagas_gupy(conn, cursor):
 
 def _varrer_gupy(conn, cursor, erros):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': USER_AGENT,
         'Accept':     'application/json, text/plain, */*',
         'Origin':     'https://portal.gupy.io',
     }
@@ -434,7 +454,7 @@ def _varrer_gupy(conn, cursor, erros):
 
         for pagina in range(1, 36):
             params = filtro['params'].copy()
-            params['offset'] = (pagina - 1) * 10
+            params['offset'] = (pagina - 1) * params.get('limit', 10)
 
             try:
                 resp = requests.get(url_api, headers=headers, params=params, timeout=15)
@@ -524,7 +544,7 @@ def _varrer_programathor(conn, cursor, erros):
         return
 
     headers = {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent':      USER_AGENT,
         'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'pt-BR,pt;q=0.9',
     }
@@ -626,7 +646,7 @@ def _varrer_linkedin(conn, cursor, erros):
         return
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': USER_AGENT,
     }
     url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 
@@ -727,7 +747,7 @@ def _varrer_posts_linkedin(conn, cursor, erros):
             texto, autor, link = post["text"], post["author"], post["link"]
 
             if not post_relevante(texto):
-                print(f"   🚫 Sem flutter + vaga + remoto/remota: {texto[:55]}")
+                print(f"   🚫 Sem flutter + vaga(s) + remoto/remota: {texto[:55]}")
                 continue
 
             bloqueada, motivo = filtros_basicos(texto, autor)
@@ -742,10 +762,10 @@ def _varrer_posts_linkedin(conn, cursor, erros):
 
             mensagem = (
                 f"📝 <b>LINKEDIN PUBLICAÇÃO — {filtro['nome']}</b>\n\n"
-                f"👤 <b>Autor:</b> {html.escape(autor)}\n"
-                f"📅 <b>Data:</b> {post['date']}\n\n"
-                f"💬 {html.escape(resumo)}\n\n"
-                f"🔗 <a href='{html.escape(link)}'>Ver publicação</a>"
+                f"👤 <b>Autor:</b> {escapar(autor)}\n"
+                f"📅 <b>Data:</b> {escapar(post['date'])}\n\n"
+                f"💬 {escapar(resumo)}\n\n"
+                f"🔗 <a href='{escapar(link)}'>Ver publicação</a>"
             )
             registrar_e_enviar(conn, cursor, link, texto, autor, post["date"], mensagem, "LINKEDIN_POST")
 
@@ -770,7 +790,7 @@ def _get_inhire(url, headers):
 
 def _varrer_inhire(conn, cursor, erros):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': USER_AGENT,
     }
     url_base = "https://api.inhire.app/job-posts/public/pages"
 
@@ -782,7 +802,9 @@ def _varrer_inhire(conn, cursor, erros):
         errors=erros,
     )
     print(f"   📋 {len(empresas)} empresas para verificar")
+    filtros = [(filtro, _padrao_termos([filtro['termo']])) for filtro in FILTROS_INHIRE]
     sem_resposta = []
+    erro_leitura = []
     inexistentes = []
 
     for empresa_slug in empresas:
@@ -810,22 +832,17 @@ def _varrer_inhire(conn, cursor, erros):
                 print("   🔚 Nenhuma vaga encontrada.")
                 continue
 
-            for filtro in FILTROS_INHIRE:
-                # Vamos buscar vagas para cada filtro
+            for filtro, padrao_termo in filtros:
                 for job in jobs:
                     if job.get('status') != 'published':
                         continue
-                        
-                    titulo = job.get('displayName', 'Título Indisponível')
-                    titulo_lower = titulo.lower()
-                    
-                    if filtro['termo'] not in titulo_lower:
+
+                    # Fields may come as null: .get(key, default) does not cover that
+                    titulo = job.get('displayName') or 'Título Indisponível'
+                    if not padrao_termo.search(titulo.lower()):
                         continue
-                        
-                    modelo_api = job.get('workplaceType', '').lower()
-                    modelo = TRADUCAO_MODELO.get(modelo_api, "Não informado")
-                    
-                    if filtro['local_filtro'] == 'remoto' and modelo_api != 'remote':
+
+                    if (job.get('workplaceType') or '').lower() != 'remote':
                         continue
                         
                     job_id = job.get('jobId')
@@ -850,7 +867,7 @@ def _varrer_inhire(conn, cursor, erros):
                         f"💼 <b>Vaga:</b> {escapar(titulo)}\n"
                         f"🏢 <b>Empresa:</b> {escapar(nome_empresa)}\n"
                         f"📍 <b>Local:</b> {escapar(local)}\n"
-                        f"💻 <b>Modelo:</b> {modelo}\n"
+                        f"💻 <b>Modelo:</b> Remoto\n"
                         f"📅 <b>Data (Descoberta):</b> {data_f}\n\n"
                         f"🔗 <a href='{escapar(link)}'>Aplicar na Inhire</a>"
                     )
@@ -861,7 +878,7 @@ def _varrer_inhire(conn, cursor, erros):
             sem_resposta.append(f"{empresa_slug} (sem resposta)")
         except Exception as e:
             print(f"   ⚠️  Erro ao ler vagas de {empresa_slug}: {e}")
-            sem_resposta.append(f"{empresa_slug} (erro ao ler)")
+            erro_leitura.append(empresa_slug)
 
     # Apaga no fim, e só se forem poucas: muitas de uma vez indica mudança na
     # Inhire, e apagar esvaziaria o banco
@@ -876,6 +893,9 @@ def _varrer_inhire(conn, cursor, erros):
 
     if sem_resposta:
         erros.append(f"{len(sem_resposta)} de {len(empresas)} empresas não responderam: {resumir_lista(sem_resposta)}.")
+    if erro_leitura:
+        erros.append(f"Não foi possível ler as vagas de {len(erro_leitura)} de {len(empresas)} empresas "
+                     f"(a resposta veio num formato inesperado): {resumir_lista(erro_leitura)}.")
 
 # --- 8. SOLIDES ---
 
@@ -932,7 +952,7 @@ def buscar_vagas_solides(conn, cursor):
 
 def _varrer_solides(conn, cursor, erros):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': USER_AGENT,
     }
 
     for filtro in FILTROS_SOLIDES:
@@ -989,12 +1009,12 @@ def _varrer_solides(conn, cursor, erros):
 
                     mensagem = (
                         f"🟢 <b>SOLIDES — {filtro['nome']}</b>\n\n"
-                        f"💼 <b>Vaga:</b> {html.escape(titulo)}\n"
-                        f"🏢 <b>Empresa:</b> {html.escape(empresa)}\n"
-                        f"📍 <b>Local:</b> {html.escape(local)}\n"
-                        f"💻 <b>Modelo:</b> {modelo}\n"
-                        f"📅 <b>Data:</b> {data_f}\n\n"
-                        f"🔗 <a href='{link}'>Aplicar na Solides</a>"
+                        f"💼 <b>Vaga:</b> {escapar(titulo)}\n"
+                        f"🏢 <b>Empresa:</b> {escapar(empresa)}\n"
+                        f"📍 <b>Local:</b> {escapar(local)}\n"
+                        f"💻 <b>Modelo:</b> {escapar(modelo)}\n"
+                        f"📅 <b>Data:</b> {escapar(data_f)}\n\n"
+                        f"🔗 <a href='{escapar(link)}'>Aplicar na Solides</a>"
                     )
                     registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "SOLIDES")
 
@@ -1015,7 +1035,9 @@ def buscar_vagas_web(conn, cursor):
         filters=FILTROS_WEB,
         pages=PAGINAS_WEB,
         excluded_sites=SITES_EXCLUIDOS_WEB,
-        required_terms=TERMOS_OBRIGATORIOS_POSTS,
+        required_terms=TERMOS_OBRIGATORIOS_WEB,
+        blocked_terms=TERMOS_BLOQUEADOS_WEB,
+        max_age_days=DIAS_WEB,
         ignored_companies=EMPRESAS_IGNORADAS,
         send=registrar_e_enviar,
         errors=erros,

@@ -185,7 +185,7 @@ PAGINAS_POSTS_LINKEDIN = 1
 
 TERMOS_OBRIGATORIOS_POSTS = [
     ["flutter"],
-    ["vaga"],
+    ["vaga", "vagas"],
     ["remoto", "remota"],
 ]
 ```
@@ -196,21 +196,30 @@ TERMOS_OBRIGATORIOS_POSTS = [
 | `PAGINAS_POSTS_LINKEDIN` | Páginas por termo (cada filtro × página = 1 consulta, até 20 posts) |
 | `TERMOS_OBRIGATORIOS_POSTS` | Grupos de palavras: o texto precisa ter ao menos uma palavra de **cada** grupo |
 
-Com a configuração padrão, a publicação só é enviada se tiver "flutter" **e** "vaga" **e** ("remoto" **ou** "remota"), como palavras inteiras. O autor é comparado com `EMPRESAS_IGNORADAS`.
+Com a configuração padrão, a publicação só é enviada se tiver "flutter" **e** ("vaga" **ou** "vagas") **e** ("remoto" **ou** "remota"), como palavras inteiras. O autor é comparado com `EMPRESAS_IGNORADAS`.
 
 ---
 
 #### `FILTROS_WEB`
 
-Busca vagas publicadas nas últimas 24h em **qualquer site** (blogs, portais de vagas, sites de empresas...), sem ficar preso às fontes acima. Usa a mesma Brave Search API e a mesma regra de `TERMOS_OBRIGATORIOS_POSTS`. O código fica em `web_search.py`; o `main.py` só passa as configurações. O domínio do site aparece como autor e também é comparado com `EMPRESAS_IGNORADAS` (ex.: adicione `"indeed"` para ignorar o Indeed).
+Busca vagas publicadas nos últimos `DIAS_WEB` dias em **qualquer site** (blogs, portais de vagas, sites de empresas...), sem ficar preso às fontes acima. Usa a mesma Brave Search API e a regra `TERMOS_OBRIGATORIOS_WEB`: "flutter" **e** ("remoto", "remota" **ou** "home office", com ou sem hífen). Nem o termo pesquisado nem a regra exigem "vaga", porque muitas páginas de vaga só trazem o cargo. O código fica em `web_search.py`; o `main.py` só passa as configurações. O domínio do site aparece como autor e também é comparado com `EMPRESAS_IGNORADAS` (ex.: adicione `"indeed"` para ignorar o Indeed).
 
 ```python
 FILTROS_WEB = [
-    {"nome": "FLUTTER · VAGA · REMOTO", "termo": "flutter vaga remoto OR remota"},
+    {"nome": "FLUTTER · REMOTO", "termo": "flutter remoto"},
 ]
 PAGINAS_WEB = 1
 SITES_EXCLUIDOS_WEB = ["linkedin.com"]
+TERMOS_OBRIGATORIOS_WEB = [
+    ["flutter"],
+    ["remoto", "remota", "home office", "home-office", "homeoffice"],
+]
+TERMOS_BLOQUEADOS_WEB = ["híbrido", "hibrido", "híbrida", "hibrida", "presencial"]
+DIAS_WEB = 7
 ```
+
+- `TERMOS_BLOQUEADOS_WEB`: a página é descartada se tiver qualquer um desses termos. Um texto como "100% remoto, sem presencial" também cai fora.
+- `DIAS_WEB`: até quantos dias atrás buscar. Em 24h quase nada sobre Flutter aparece na web, então o padrão é a última semana. Cada vaga é enviada uma vez só, então não há repetição. A Brave só filtra por dia, semana, mês ou ano.
 
 `SITES_EXCLUIDOS_WEB` tira domínios da busca (com `-site:` na consulta da Brave), incluindo subdomínios. O LinkedIn fica de fora porque já tem busca própria.
 
@@ -224,15 +233,16 @@ A InHire não publica a lista de empresas: a busca de vagas precisa do subdomín
 
 ```python
 FILTROS_INHIRE = [
-    {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
-    {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
+    {"nome": "FLUTTER · REMOTO", "termo": "flutter"},
+    {"nome": "MOBILE · REMOTO",  "termo": "mobile"},
 ]
 ```
 
 | Campo | Descrição | Valores válidos |
 |---|---|---|
-| `termo` | Termo buscado no título da vaga | qualquer string |
-| `local_filtro` | Modalidade | `'remoto'` · `'presencial'` |
+| `termo` | Termo buscado no título da vaga (palavra inteira) | qualquer string |
+
+Só entram vagas remotas da InHire.
 
 > Para incluir uma empresa na mão: `sqlite3 vagas_gupy.db "INSERT OR IGNORE INTO inhire_tenants (slug, found_at) VALUES ('empresa', datetime('now'))"` (subdomínio de `empresa.inhire.app`).
 
