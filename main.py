@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 import linkedin_posts
+import web_search
 
 try:
     from bs4 import BeautifulSoup
@@ -83,6 +84,18 @@ FILTROS_POSTS_LINKEDIN = [
     {"nome": "FLUTTER · VAGA · REMOTO", "termo": "flutter vaga remoto OR remota"},
 ]
 PAGINAS_POSTS_LINKEDIN = 1
+
+# Web toda — páginas das últimas 24h em qualquer site (blogs, portais de vagas,
+# sites de empresas...), também via Brave Search (código em web_search.py).
+# Usa TERMOS_OBRIGATORIOS_POSTS e EMPRESAS_IGNORADAS (comparado com o domínio).
+# Cada filtro × página também gasta 1 consulta da cota da Brave.
+FILTROS_WEB = [
+    {"nome": "FLUTTER · VAGA · REMOTO", "termo": "flutter vaga remoto OR remota"},
+]
+PAGINAS_WEB = 1
+# Domínios fora da busca na web (subdomínios inclusos). O LinkedIn já tem
+# busca própria (vagas e publicações), então ficaria repetido.
+SITES_EXCLUIDOS_WEB = ["linkedin.com"]
 
 # A publicação só é enviada se o texto tiver ao menos um termo de CADA grupo
 # (palavra inteira, case-insensitive): flutter E vaga E (remoto OU remota).
@@ -788,6 +801,17 @@ def main():
     buscar_posts_linkedin(conn, cursor)
     buscar_vagas_inhire(conn, cursor)
     buscar_vagas_solides(conn, cursor)
+    # Last: dedicated sources send richer messages for the same links
+    web_search.search_jobs(
+        conn, cursor,
+        api_key=BRAVE_API_KEY,
+        filters=FILTROS_WEB,
+        pages=PAGINAS_WEB,
+        excluded_sites=SITES_EXCLUIDOS_WEB,
+        required_terms=TERMOS_OBRIGATORIOS_POSTS,
+        ignored_companies=EMPRESAS_IGNORADAS,
+        send=registrar_e_enviar,
+    )
 
     conn.close()
     print("\n✅ Varredura completa de todas as fontes!")

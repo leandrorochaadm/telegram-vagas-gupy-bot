@@ -84,10 +84,10 @@ Abra o `.env` e preencha os valores:
 ```env
 TELEGRAM_TOKEN=seu_token_aqui
 CHAT_ID_GRUPO=seu_chat_id_aqui
-BRAVE_API_KEY=sua_chave_brave   # opcional: publicações do LinkedIn
+BRAVE_API_KEY=sua_chave_brave   # opcional: publicações do LinkedIn e busca na web
 ```
 
-> **Como obter a `BRAVE_API_KEY` (opcional):** crie uma conta em [Brave Search API](https://brave.com/search/api/) e gere uma chave no plano grátis (US$ 5 de crédito por mês, cerca de 1.000 consultas; ative o "Monthly Usage Limit" em US$ 5 para nunca ser cobrado). Sem ela, o bot só pula a busca de publicações do LinkedIn.
+> **Como obter a `BRAVE_API_KEY` (opcional):** crie uma conta em [Brave Search API](https://brave.com/search/api/) e gere uma chave no plano grátis (US$ 5 de crédito por mês, cerca de 1.000 consultas; ative o "Monthly Usage Limit" em US$ 5 para nunca ser cobrado). Sem ela, o bot só pula a busca de publicações do LinkedIn e a busca na web.
 
 > **Como obter o `TELEGRAM_TOKEN`:** crie um bot no Telegram via [@BotFather](https://t.me/botfather) e copie o token gerado.
 >
@@ -199,6 +199,24 @@ Com a configuração padrão, a publicação só é enviada se tiver "flutter" *
 
 ---
 
+#### `FILTROS_WEB`
+
+Busca vagas publicadas nas últimas 24h em **qualquer site** (blogs, portais de vagas, sites de empresas...), sem ficar preso às fontes acima. Usa a mesma Brave Search API e a mesma regra de `TERMOS_OBRIGATORIOS_POSTS`. O código fica em `web_search.py`; o `main.py` só passa as configurações. O domínio do site aparece como autor e também é comparado com `EMPRESAS_IGNORADAS` (ex.: adicione `"indeed"` para ignorar o Indeed).
+
+```python
+FILTROS_WEB = [
+    {"nome": "FLUTTER · VAGA · REMOTO", "termo": "flutter vaga remoto OR remota"},
+]
+PAGINAS_WEB = 1
+SITES_EXCLUIDOS_WEB = ["linkedin.com"]
+```
+
+`SITES_EXCLUIDOS_WEB` tira domínios da busca (com `-site:` na consulta da Brave), incluindo subdomínios. O LinkedIn fica de fora porque já tem busca própria.
+
+Cada filtro × página também gasta 1 consulta da cota da Brave, somada às publicações do LinkedIn.
+
+---
+
 #### `FILTROS_INHIRE` e `EMPRESAS_INHIRE`
 
 A InHire funciona de forma diferente: você define as **empresas** que deseja monitorar (pelo subdomínio delas) e os termos de busca.
@@ -284,7 +302,7 @@ Vá em **Settings → Secrets and variables → Actions → New repository secre
 |---|---|
 | `TELEGRAM_TOKEN` | Token gerado pelo [@BotFather](https://t.me/botfather) |
 | `CHAT_ID_GRUPO` | ID do seu grupo ou canal do Telegram |
-| `BRAVE_API_KEY` | (Opcional) Chave da Brave Search API, para as publicações do LinkedIn |
+| `BRAVE_API_KEY` | (Opcional) Chave da Brave Search API, para as publicações do LinkedIn e a busca na web |
 
 ### 2. Ative o workflow
 
