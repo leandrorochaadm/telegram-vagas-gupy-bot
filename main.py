@@ -42,6 +42,8 @@ carregar_env()
 TOKEN   = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID_GRUPO")
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
+# Set by the workflow to WARP's local SOCKS proxy: Cloudflare blocks the runners' datacenter IPs
+SCRAPER_PROXY = os.getenv("SCRAPER_PROXY")
 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
@@ -576,6 +578,8 @@ def _varrer_programathor(conn, cursor, erros):
         'Accept-Language': 'pt-BR,pt;q=0.9',
     }
 
+    proxies = {'http': SCRAPER_PROXY, 'https': SCRAPER_PROXY} if SCRAPER_PROXY else None
+
     for filtro in FILTROS_PROGRAMATHOR:
         print(f"\n   🔎 {filtro['nome']}...")
 
@@ -588,7 +592,7 @@ def _varrer_programathor(conn, cursor, erros):
             params = {} if pagina == 1 else {"page": pagina}
 
             try:
-                resp = requests.get(base_url, params=params, headers=headers, timeout=15)
+                resp = requests.get(base_url, params=params, headers=headers, timeout=15, proxies=proxies)
                 if resp.status_code != 200:
                     print(f"   🛑 HTTP {resp.status_code}")
                     erros.append(f"{filtro['nome']}: o ProgramaThor recusou a busca ({resp.status_code}).")
