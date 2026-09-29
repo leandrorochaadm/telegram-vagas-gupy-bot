@@ -231,7 +231,8 @@ class MainWiringTest(unittest.TestCase):
 
     def test_passes_web_settings(self):
         with mock.patch.object(main.web_search, "search_jobs") as search_jobs, \
-             mock.patch.object(main, "anotar_avisos"):
+             mock.patch.object(main, "anotar_avisos"), \
+             mock.patch.object(main, "brave_due", return_value=True):
             main.buscar_vagas_web(mock.Mock(), mock.Mock())
         kwargs = search_jobs.call_args.kwargs
         self.assertIs(kwargs["required_terms"], main.TERMOS_OBRIGATORIOS_WEB)

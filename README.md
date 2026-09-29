@@ -194,6 +194,7 @@ TERMOS_OBRIGATORIOS_POSTS = [
 |---|---|
 | `termo` | Termo pesquisado nas publicações |
 | `PAGINAS_POSTS_LINKEDIN` | Páginas por termo (cada filtro × página = 1 consulta, até 20 posts) |
+| `INTERVALO_POSTS_LINKEDIN_MIN` | Minutos mínimos entre buscas de publicações (padrão 60), para caber na cota da Brave |
 | `TERMOS_OBRIGATORIOS_POSTS` | Grupos de palavras: o texto precisa ter ao menos uma palavra de **cada** grupo |
 
 Com a configuração padrão, a publicação só é enviada se tiver "flutter" **e** ("vaga" **ou** "vagas") **e** ("remoto" **ou** "remota"), como palavras inteiras. O autor é comparado com `EMPRESAS_IGNORADAS`.
@@ -216,6 +217,7 @@ TERMOS_OBRIGATORIOS_WEB = [
 ]
 TERMOS_BLOQUEADOS_WEB = ["híbrido", "hibrido", "híbrida", "hibrida", "presencial"]
 DIAS_WEB = 7
+INTERVALO_WEB_MIN = 180
 ```
 
 - `TERMOS_BLOQUEADOS_WEB`: a página é descartada se tiver qualquer um desses termos. Um texto como "100% remoto, sem presencial" também cai fora.
@@ -224,6 +226,8 @@ DIAS_WEB = 7
 `SITES_EXCLUIDOS_WEB` tira domínios da busca (com `-site:` na consulta da Brave), incluindo subdomínios. O LinkedIn fica de fora porque já tem busca própria.
 
 Cada filtro × página também gasta 1 consulta da cota da Brave, somada às publicações do LinkedIn.
+
+**Cota da Brave:** o bot roda a cada 30 min, mas o plano grátis só aguenta ~1.000 consultas por mês. Por isso as buscas na Brave têm intervalo mínimo, guardado na tabela `brave_searches` do banco: `INTERVALO_POSTS_LINKEDIN_MIN = 60` (publicações) e `INTERVALO_WEB_MIN = 180` (web), cerca de 500 consultas por mês no total. Dentro do intervalo, só a busca na Brave é pulada; as outras fontes rodam normalmente. `FOLGA_INTERVALO_BRAVE_MIN = 10` evita pular a busca quando o disparo chega segundos antes de completar o intervalo.
 
 ---
 

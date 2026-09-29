@@ -91,6 +91,9 @@ FILTROS_POSTS_LINKEDIN = [
     {"nome": "FLUTTER · VAGA · REMOTO", "termo": "flutter vaga remoto OR remota"},
 ]
 PAGINAS_POSTS_LINKEDIN = 1
+# Intervalo mínimo entre buscas de publicações. O bot roda a cada 30 min, mas a
+# cota da Brave (~1.000/mês) só aguenta ~500 buscas: de hora em hora gasta ~360.
+INTERVALO_POSTS_LINKEDIN_MIN = 60
 
 # Web toda — páginas das últimas 24h em qualquer site (blogs, portais de vagas,
 # sites de empresas...), também via Brave Search (código em web_search.py).
@@ -118,6 +121,12 @@ TERMOS_BLOQUEADOS_WEB = ["híbrido", "hibrido", "híbrida", "hibrida", "presenci
 # 24h; uma vaga nunca é enviada duas vezes, então olhar a semana não repete.
 # A Brave só filtra por dia, semana, mês ou ano: 7 = última semana.
 DIAS_WEB = 7
+# Intervalo mínimo entre buscas na web. Como ela olha a semana toda, rodar a
+# cada 30 min quase não acha nada novo: a cada 3h gasta ~130 consultas/mês.
+INTERVALO_WEB_MIN = 180
+# Folga no intervalo da Brave: o disparo das 10h pode chegar segundos antes de
+# completar 1h do das 9h e, sem folga, pularia a busca.
+FOLGA_INTERVALO_BRAVE_MIN = 10
 
 # A publicação só é enviada se o texto tiver ao menos um termo de CADA grupo
 # (palavra inteira, case-insensitive): flutter E vaga(s) E (remoto OU remota).
@@ -421,6 +430,24 @@ def enviar_avisos(conn, cursor, agora=None):
         cursor.execute("DELETE FROM avisos_enviados")
         cursor.execute("INSERT INTO avisos_enviados VALUES (?)", (agora.isoformat(timespec="seconds"),))
         conn.commit()
+
+def brave_due(conn, cursor, source, interval_min, now=None):
+    """True when `source` last used the Brave quota `interval_min` minutes ago or more.
+
+    When due, the current time is saved as the source's last search.
+    """
+    # UTC for the same reason as enviar_avisos: the db travels between GitHub and local runs
+    now = now or datetime.now(timezone.utc)
+    cursor.execute("CREATE TABLE IF NOT EXISTS brave_searches (source TEXT PRIMARY KEY, searched_at TEXT)")
+    row = cursor.execute("SELECT searched_at FROM brave_searches WHERE source = ?", (source,)).fetchone()
+    wait = timedelta(minutes=interval_min - FOLGA_INTERVALO_BRAVE_MIN)
+    if row and now - datetime.fromisoformat(row[0]) < wait:
+        print(f"\n⏳ {source}: busca na Brave pulada (uma a cada {interval_min} min, para caber na cota)")
+        return False
+    # Saved before searching: a failed search still spends quota
+    cursor.execute("INSERT OR REPLACE INTO brave_searches VALUES (?, ?)", (source, now.isoformat(timespec="seconds")))
+    conn.commit()
+    return True
 
 def filtros_basicos(titulo, empresa=None):
     """Retorna (bloqueada, motivo) com os filtros de perfil."""
@@ -730,6 +757,8 @@ def buscar_posts_linkedin(conn, cursor):
     varrer_com_aviso("LINKEDIN PUBLICAÇÕES", _varrer_posts_linkedin, conn, cursor)
 
 def _varrer_posts_linkedin(conn, cursor, erros):
+    if not brave_due(conn, cursor, "LINKEDIN PUBLICAÇÕES", INTERVALO_POSTS_LINKEDIN_MIN):
+        return
     for filtro in FILTROS_POSTS_LINKEDIN:
         print(f"\n   🔎 {filtro['nome']}...")
         falhas_brave = []
@@ -1029,7 +1058,12 @@ def _varrer_solides(conn, cursor, erros):
 # --- MAIN ---
 
 def buscar_vagas_web(conn, cursor):
-    varrer_com_aviso("WEB", lambda conn, cursor, erros: web_search.search_jobs(
+    varrer_com_aviso("WEB", _varrer_web, conn, cursor)
+
+def _varrer_web(conn, cursor, erros):
+    if BRAVE_API_KEY and not brave_due(conn, cursor, "WEB", INTERVALO_WEB_MIN):
+        return
+    web_search.search_jobs(
         conn, cursor,
         api_key=BRAVE_API_KEY,
         filters=FILTROS_WEB,
@@ -1041,7 +1075,7 @@ def buscar_vagas_web(conn, cursor):
         ignored_companies=EMPRESAS_IGNORADAS,
         send=registrar_e_enviar,
         errors=erros,
-    ), conn, cursor)
+    )
 
 def anotar_falhas_envio():
     """Anota no aviso as vagas que o Telegram não entregou nesta execução."""
