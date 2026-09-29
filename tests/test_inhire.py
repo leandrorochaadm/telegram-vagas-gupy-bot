@@ -86,7 +86,29 @@ class BuscarVagasInhireTest(unittest.TestCase):
         broken = response()
         broken.json.side_effect = ValueError("not json")
         self.scan(broken, jobs_page())
-        self.assertIn("acme (erro ao ler)", self.telegram.call_args.args[0])
+        alert = self.telegram.call_args.args[0]
+        self.assertIn("Não foi possível ler as vagas de 1 de 2 empresas", alert)
+        self.assertNotIn("não responderam", alert)
+
+    def test_null_fields_skip_only_that_job(self):
+        broken = {"status": "published", "displayName": None, "workplaceType": None, "jobId": "9"}
+        self.scan(jobs_page(broken, job()), jobs_page())
+        self.send.assert_called_once()
+        self.telegram.assert_not_called()
+
+    def test_term_must_be_a_whole_word(self):
+        with mock.patch.object(main, "FILTROS_INHIRE",
+                               [{"nome": "GO · REMOTO", "termo": "go"}]):
+            self.scan(jobs_page(job(title="Analista Google")), jobs_page(job(title="Dev Go Pleno")))
+        self.send.assert_called_once()
+        self.assertEqual(self.send.call_args.args[3], "Dev Go Pleno")
+
+    def test_only_remote_jobs_are_sent(self):
+        self.scan(jobs_page(job(workplace="On-site", job_id="1"), job(workplace="Hybrid", job_id="2"),
+                            job(workplace="Remote", job_id="3")),
+                  jobs_page())
+        self.send.assert_called_once()
+        self.assertIn("/vagas/3/", self.send.call_args.args[2])
 
     def test_many_missing_tenants_are_kept_and_alerted(self):
         not_found = response(404, '{"message":"Tenant not found"}')
