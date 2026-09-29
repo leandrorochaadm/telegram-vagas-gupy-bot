@@ -9,6 +9,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
+import inhire_discovery
 import linkedin_posts
 import web_search
 
@@ -107,44 +108,44 @@ TERMOS_OBRIGATORIOS_POSTS = [
 
 # Inhire: busca por termo no título + filtro de localização.
 # local_filtro válidos: 'remoto' | 'presencial'
-# Requer também EMPRESAS_INHIRE abaixo (lista de subdomínios monitorados).
+# As empresas ficam na tabela inhire_tenants do banco (ver descoberta abaixo).
 FILTROS_INHIRE = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
     # {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
 ]
 
-# Inhire — empresas monitoradas.
-# Adicione apenas o subdomínio: ex. "empresa" para empresa.inhire.app
-EMPRESAS_INHIRE = [
-    "reclameaqui",
-    "mottu",
-    "solutis",
-    "avenue",
-    "dtidigital",
-    "frameworkdigital",
-    "deal",
-    "aarin",
-    'kobe',
-    'peers',
-    'cubos',
-    'iconit',
-    'exa',
-    'programmers',
-    'growdev',
-    'aarin',
-    'wtime',
-    'kstack',
-    'premiersoft',
-    'pilar',
-    'ninecon',
-    'jump',
-    'via',
-    'contaazul',
-    'semantix',
-    'mazzatech',
-    'cappta',
-    'nstech'
+# Inhire — descoberta automática de empresas. A Inhire não publica a lista de
+# empresas, então o bot pesquisa páginas *.inhire.app no Yahoo (grátis) e,
+# opcionalmente na Brave (USAR_BRAVE_DESCOBERTA_INHIRE).
+# As empresas achadas ficam salvas no banco e a lista cresce a cada rodada.
+# Mais termos = mais empresas encontradas.
+TERMOS_DESCOBERTA_INHIRE = [
+    "site:inhire.app vagas",
+    "site:inhire.app flutter",
+    "site:inhire.app mobile",
+    "site:inhire.app desenvolvedor",
+    "site:inhire.app engenheiro de software",
+    "site:inhire.app tecnologia",
+    "site:inhire.app remoto",
+    "site:inhire.app estágio",
+    "site:inhire.app analista",
+    "site:inhire.app trabalhe conosco",
+    "site:inhire.app front-end",
+    "site:inhire.app back-end",
+    "site:inhire.app react native",
+    "site:inhire.app dados",
+    "site:inhire.app produto",
+    "site:inhire.app pleno",
+    "site:inhire.app sênior",
+    "site:inhire.app júnior",
+    "site:inhire.app híbrido",
+    "site:inhire.app são paulo",
 ]
+# Intervalo entre descobertas (a busca por vagas continua em toda execução).
+DIAS_DESCOBERTA_INHIRE = 7
+# Brave acha mais empresas, mas gasta até 10 consultas da cota por termo a cada
+# descoberta (20 termos ≈ 800 consultas/mês). Requer BRAVE_API_KEY.
+USAR_BRAVE_DESCOBERTA_INHIRE = False
 
 # Solides: busca pela página pública vagas.solides.com.br/vagas/<modalidade>/<termo>.
 # 'caminho' = "<modalidade>/<termo>". A modalidade no caminho já filtra as vagas
@@ -594,12 +595,25 @@ def buscar_vagas_inhire(conn, cursor):
     }
     url_base = "https://api.inhire.app/job-posts/public/pages"
 
-    for empresa_slug in EMPRESAS_INHIRE:
+    empresas = inhire_discovery.discover(
+        conn, cursor,
+        queries=TERMOS_DESCOBERTA_INHIRE,
+        brave_api_key=BRAVE_API_KEY if USAR_BRAVE_DESCOBERTA_INHIRE else None,
+        every=timedelta(days=DIAS_DESCOBERTA_INHIRE),
+    )
+    print(f"   📋 {len(empresas)} empresas para verificar")
+
+    for empresa_slug in empresas:
         print(f"\n   🏢 {empresa_slug.upper()}...")
         headers['X-Tenant'] = empresa_slug
         
         try:
             resp = requests.get(url_base, headers=headers, timeout=15)
+            if resp.status_code == 404:
+                # Subdomínio que não é (ou deixou de ser) empresa da Inhire
+                print("   🗑️  Empresa não existe na Inhire — removida da lista")
+                inhire_discovery.remove_tenant(conn, cursor, empresa_slug)
+                continue
             if resp.status_code != 200:
                 print(f"   🛑 HTTP {resp.status_code}")
                 continue

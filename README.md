@@ -217,22 +217,14 @@ Cada filtro × página também gasta 1 consulta da cota da Brave, somada às pub
 
 ---
 
-#### `FILTROS_INHIRE` e `EMPRESAS_INHIRE`
+#### `FILTROS_INHIRE`
 
-A InHire funciona de forma diferente: você define as **empresas** que deseja monitorar (pelo subdomínio delas) e os termos de busca.
+A InHire não publica a lista de empresas: a busca de vagas precisa do subdomínio de cada uma. Por isso as empresas ficam na tabela `inhire_tenants` do banco, preenchida pela **descoberta automática** (ver abaixo).
 
 ```python
 FILTROS_INHIRE = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
     {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
-]
-
-# Subdomínio de cada empresa: ex. "reclameaqui" para reclameaqui.inhire.app
-EMPRESAS_INHIRE = [
-    "reclameaqui",
-    "mottu",
-    "solutis",
-    # Adicione mais empresas aqui
 ]
 ```
 
@@ -241,7 +233,23 @@ EMPRESAS_INHIRE = [
 | `termo` | Termo buscado no título da vaga | qualquer string |
 | `local_filtro` | Modalidade | `'remoto'` · `'presencial'` |
 
-> Para adicionar uma empresa: acesse o portal de vagas dela na InHire (ex: `empresa.inhire.app`) e adicione o subdomínio `"empresa"` na lista `EMPRESAS_INHIRE`.
+> Para incluir uma empresa na mão: `sqlite3 vagas_gupy.db "INSERT OR IGNORE INTO inhire_tenants (slug, found_at) VALUES ('empresa', datetime('now'))"` (subdomínio de `empresa.inhire.app`).
+
+#### Descoberta automática de empresas da InHire
+
+O bot pesquisa páginas `*.inhire.app` no Yahoo (grátis) e, opcionalmente, na Brave (`USAR_BRAVE_DESCOBERTA_INHIRE = True`, requer `BRAVE_API_KEY`). Cada subdomínio achado fica salvo na tabela `inhire_tenants` do banco, então a lista cresce a cada rodada. Subdomínios que a InHire não reconhece são removidos sozinhos.
+
+```python
+TERMOS_DESCOBERTA_INHIRE = [
+    "site:inhire.app vagas",
+    "site:inhire.app flutter",
+    # Mais termos = mais empresas encontradas
+]
+DIAS_DESCOBERTA_INHIRE = 7  # intervalo entre descobertas
+USAR_BRAVE_DESCOBERTA_INHIRE = False  # Brave: mais empresas, mas gasta cota
+```
+
+A busca de vagas continua em toda execução; só a descoberta respeita o intervalo. Com a Brave ativa, cada termo gasta até 10 consultas da cota por descoberta.
 
 ---
 
