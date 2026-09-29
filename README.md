@@ -31,7 +31,7 @@ GitHub Actions (agendado automaticamente)
     ↓
 Varre Gupy + LinkedIn + ProgramaThor + Solides + InHire
     ↓
-Aplica filtros de perfil (gaps eliminatórios, empresas ignoradas)
+Aplica filtros de perfil (termo obrigatório no título, empresas ignoradas)
     ↓
 Calcula score de match com a sua stack técnica
     ↓
@@ -46,13 +46,13 @@ Salva histórico no banco SQLite (evita reenvio de vagas já vistas)
 
 | Fonte | Tipo de acesso | O que é analisado no match |
 |---|---|---|
-| 🟣 **Gupy** | API JSON | Título da vaga |
+| 🟣 **Gupy** | API JSON | Título + descrição completa |
 | 🔷 **LinkedIn** | API Guest (sem login) | Título da vaga |
 | 🟤 **ProgramaThor** | Web Scraping | Título + tags de tecnologia do card |
 | 🟢 **Solides** | API JSON | Título + descrição completa |
 | 🟣 **InHire** | API JSON | Título da vaga |
 
-> **Atenção:** para Gupy, LinkedIn e InHire, tecnologias mencionadas somente na descrição da vaga **não são detectadas** pelo score de match — apenas o título é analisado.
+> **Atenção:** para LinkedIn e InHire, tecnologias mencionadas somente na descrição da vaga **não são detectadas** pelo score de match — apenas o título é analisado.
 
 ---
 
@@ -219,21 +219,13 @@ FILTROS_SOLIDES = [
 
 ### B. Perfil — filtros que bloqueiam vagas
 
-#### `GAPS_ELIMINATORIOS`
+#### `TERMO_OBRIGATORIO_TITULO`
 
-Lista de termos que, se encontrados no **título** da vaga, eliminam ela automaticamente. Use para tecnologias que você não domina ou modalidades indesejadas.
+Palavra que precisa aparecer no **título** da vaga, em todas as fontes. Vaga sem ela é descartada. A comparação é por palavra inteira e ignora maiúsculas: `"flutter"` aceita "Desenvolvedor FLUTTER Pleno", mas não "Flutterwave Analyst".
 
 ```python
-GAPS_ELIMINATORIOS = [
-    "inglês avançado", "inglês fluente",  # exigências de idioma
-    "presencial",                          # modalidade indesejada
-    "php", "python", "node.js", "react",  # tecnologias fora do seu stack
-    "fullstack", "qa", "product manager", # cargos fora do seu perfil
-    # Adicione o que fizer sentido para o seu caso
-]
+TERMO_OBRIGATORIO_TITULO = "flutter"
 ```
-
-> ⚠️ A busca é **case-insensitive** e **parcial**: `"node"` também bloqueia `"Node.js Developer"`.
 
 ---
 
@@ -314,11 +306,11 @@ Em um fork, sem o Worker, o bot roda só nos horários de reserva. Para ter o ag
 
 ## 📊 Score de match
 
-O score é calculado contando quantos termos de `MINHA_STACK` aparecem no texto analisado de cada vaga. O texto analisado varia por fonte:
+O score é calculado contando quantos termos de `MINHA_STACK` aparecem, como palavra inteira, no texto analisado de cada vaga. Antes disso, vagas sem `TERMO_OBRIGATORIO_TITULO` ("flutter") no título são descartadas. O texto analisado varia por fonte:
 
 | Fonte | Texto analisado |
 |---|---|
-| Gupy | Título da vaga |
+| Gupy | Título + descrição completa |
 | LinkedIn | Título da vaga |
 | InHire | Título da vaga |
 | ProgramaThor | Título + tags de tecnologia do card |

@@ -66,8 +66,9 @@ FILTROS_PROGRAMATHOR = [
 # Para outros países, altere o campo "location".
 FILTROS_LINKEDIN = [
     {"nome": "FLUTTER · REMOTO", "params": {"keywords": "flutter", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
-    # {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile",  "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
+    # {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile developer", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
 ]
+PAGINAS_LINKEDIN = 5  # a API guest devolve ~10 vagas por página
 
 # Inhire: busca por termo no título + filtro de localização.
 # local_filtro válidos: 'remoto' | 'presencial'
@@ -127,16 +128,9 @@ FILTROS_SOLIDES = [
 DIAS_BUSCA_GUPY    = 10   # Gupy    → padrão: 10 dias
 DIAS_BUSCA_SOLIDES = 20  # Solides → padrão: 20 dias
 
-# Qualquer termo abaixo encontrado no título da vaga a elimina da lista.
-# Use letras minúsculas — a busca é case-insensitive.
-GAPS_ELIMINATORIOS = [
-    "inglês avançado", "inglês fluente", "presencial", "php", "python",
-    "node.js", "node", "sqs", "rabbitmq", "product manager",
-    "product owner", "vue.js", "java", "vue js", "salesforce", "sales force", "react", "apex",
-    "kubernetes", "kafka", "dot net", ".net", "ruby", "go", "ruby on rails", "angular", "product designer",
-    "tester", "quality assurance", "analista de testes", "qa", "fullstack", "maker", "CRO", "ux designer","typescript", "adsales", "marketing",
-    "bi analyst", "offshore", "automation", "cobol", "mainframe", "head of sales", "ai developer", "editor de vídeo"
-]
+# A vaga só é enviada se o título contiver este termo (palavra inteira,
+# case-insensitive). É o único filtro aplicado ao título.
+TERMO_OBRIGATORIO_TITULO = "flutter"
 
 # Vagas dessas empresas são ignoradas em todas as fontes.
 # A comparação é parcial e case-insensitive: "hired" também bloqueia "Hired Feed".
@@ -156,8 +150,8 @@ EMPRESAS_IGNORADAS = [
 #   🔴 Baixo  → 0 itens   |  🔵 Padrão → 1 item
 #   🟡 Médio  → 2 itens   |  🟢 Alto   → 3 ou mais
 #
-# Atenção: Gupy, LinkedIn e Inhire analisam apenas o título da vaga.
-# ProgramaThor usa título + tags; Solides usa título + descrição completa.
+# Atenção: LinkedIn e Inhire analisam apenas o título da vaga.
+# ProgramaThor usa título + tags; Gupy e Solides usam título + descrição completa.
 MINHA_STACK = [
     "flutter", "dart", "clean architecture", "bloc", "cubit", "provider", "riverpod",  "mobx",
     "firebase", "crashlytics", "remote config", "firebase performance", "firebase authentication",
@@ -179,9 +173,22 @@ def _chave_sessao(titulo: str, empresa: str) -> str:
     normalizar = lambda s: re.sub(r'[^a-z0-9]', '', s.lower())
     return normalizar(titulo)[:60] + "|" + normalizar(empresa)[:30]
 
-def tem_gap_eliminatorio(titulo):
-    t = titulo.lower()
-    return any(g in t for g in GAPS_ELIMINATORIOS)
+def _padrao_termos(termos):
+    # Palavra inteira: o termo não pode estar colado em outra letra/número
+    # (evita "ios" em "negócios", "dio" em "médio", "go" em "Google")
+    alternativas = "|".join(re.escape(t.lower()) for t in sorted(set(termos), key=len, reverse=True))
+    return re.compile(rf"(?<!\w)(?:{alternativas})(?!\w)")
+
+_RE_TITULO     = _padrao_termos([TERMO_OBRIGATORIO_TITULO])
+_RE_STACK      = [(termo, _padrao_termos([termo])) for termo in MINHA_STACK]
+
+def titulo_relevante(titulo):
+    return _RE_TITULO.search(titulo.lower()) is not None
+
+def limpar_html(html):
+    if BS4_DISPONIVEL:
+        return BeautifulSoup(html, 'html.parser').get_text(separator=' ')
+    return re.sub(r'<[^>]+>', ' ', html)
 
 def calcular_match(titulo):
     """
@@ -189,13 +196,13 @@ def calcular_match(titulo):
 
     O parâmetro `titulo` pode conter mais do que apenas o título da vaga —
     cada fonte passa textos diferentes:
-      - Gupy:        apenas o título da vaga
+      - Gupy:        título + descrição completa da vaga
       - LinkedIn:    apenas o título da vaga
       - Inhire:      apenas o título da vaga
       - ProgramaThor: título + tags de tecnologia exibidas no card
       - Solides:     título + descrição completa da vaga (HTML limpo)
 
-    Para Gupy, LinkedIn e Inhire, tecnologias mencionadas somente na descrição
+    Para LinkedIn e Inhire, tecnologias mencionadas somente na descrição
     NÃO são detectadas, podendo resultar em nível Baixo para vagas relevantes.
 
     Níveis de match (baseado na contagem de itens de MINHA_STACK encontrados):
@@ -205,7 +212,7 @@ def calcular_match(titulo):
       🟢 Alto   — 3 ou mais itens compatíveis
     """
     t = titulo.lower()
-    techs = [s for s in MINHA_STACK if s in t]
+    techs = list(dict.fromkeys(termo for termo, padrao in _RE_STACK if padrao.search(t)))
     score = len(techs)
     if score >= 3:
         nivel = "🟢 Alto"
@@ -278,8 +285,8 @@ def registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fo
 
 def filtros_basicos(titulo, empresa=None):
     """Retorna (bloqueada, motivo) com os filtros de perfil."""
-    if tem_gap_eliminatorio(titulo):
-        return True, f"🚫 Gap: {titulo[:55]}"
+    if not titulo_relevante(titulo):
+        return True, f"🚫 Sem \"{TERMO_OBRIGATORIO_TITULO}\" no título: {titulo[:55]}"
     if empresa:
         emp = empresa.lower()
         for emp_ignorada in EMPRESAS_IGNORADAS:
@@ -353,6 +360,8 @@ def buscar_vagas_gupy(conn, cursor):
                         print(f"   {motivo}")
                         continue
 
+                    texto_match = f"{titulo} {vaga.get('description') or ''} {' '.join(map(str, vaga.get('skills') or []))}"
+
                     if ja_enviada(cursor, link):
                         vagas_velhas += 1
                         if vagas_velhas >= LIMITE_VELHAS:
@@ -360,7 +369,7 @@ def buscar_vagas_gupy(conn, cursor):
                         continue
 
                     vagas_velhas = 0
-                    nivel_match, techs = calcular_match(titulo)
+                    nivel_match, techs = calcular_match(texto_match)
                     techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar descrição"
 
                     mensagem = (
@@ -447,15 +456,10 @@ def buscar_vagas_programathor(conn, cursor):
                     tipo    = spans[5].get_text(strip=True) if len(spans) > 5 else ""
                     tags    = [t.get_text(strip=True) for t in card.select('span.tag-list')]
 
-                    # Filtros básicos (gap no título ou empresa ignorada)
+                    # Filtros básicos (termo obrigatório no título ou empresa ignorada)
                     bloqueada, motivo = filtros_basicos(titulo, empresa)
                     if bloqueada:
                         print(f"   {motivo}")
-                        continue
-
-                    # Gaps nos tags de tecnologia
-                    if any(tem_gap_eliminatorio(t) for t in tags):
-                        print(f"   🚫 Gap na tag: {titulo[:55]}")
                         continue
 
                     if ja_enviada(cursor, link):
@@ -508,63 +512,69 @@ def buscar_vagas_linkedin(conn, cursor):
 
     for filtro in FILTROS_LINKEDIN:
         print(f"\n   🔎 {filtro['nome']}...")
-        try:
-            resp = requests.get(url, params=filtro["params"], headers=headers, timeout=15)
-            if resp.status_code != 200:
-                print(f"   🛑 HTTP {resp.status_code}")
-                continue
+        for pagina in range(PAGINAS_LINKEDIN):
+            params = filtro["params"].copy()
+            params["start"] = pagina * 10
+            try:
+                resp = requests.get(url, params=params, headers=headers, timeout=15)
+                if resp.status_code != 200:
+                    print(f"   🛑 HTTP {resp.status_code}")
+                    break
 
-            soup  = BeautifulSoup(resp.text, 'html.parser')
-            cards = soup.find_all('div', class_='base-card')
+                soup  = BeautifulSoup(resp.text, 'html.parser')
+                cards = soup.find_all('div', class_='base-card')
 
-            if not cards:
-                print("   🔚 Nenhuma vaga ou resposta bloqueada.")
-                continue
+                if not cards:
+                    print("   🔚 Nenhuma vaga ou resposta bloqueada.")
+                    break
 
-            for card in cards:
-                titulo_el  = card.find(class_=lambda c: c and 'title' in c)
-                empresa_el = card.find(class_=lambda c: c and 'subtitle' in c)
-                link_el    = card.find('a', href=True)
-                data_el    = card.find('time')
+                for card in cards:
+                    titulo_el  = card.find(class_=lambda c: c and 'title' in c)
+                    empresa_el = card.find(class_=lambda c: c and 'subtitle' in c)
+                    link_el    = card.find('a', href=True)
+                    data_el    = card.find('time')
 
-                titulo  = titulo_el.get_text(strip=True)  if titulo_el  else "Título Indisponível"
-                empresa = empresa_el.get_text(strip=True) if empresa_el else "Empresa não informada"
-                link    = link_el['href'].split('?')[0]   if link_el    else ''
+                    titulo  = titulo_el.get_text(strip=True)  if titulo_el  else "Título Indisponível"
+                    empresa = empresa_el.get_text(strip=True) if empresa_el else "Empresa não informada"
+                    link    = link_el['href'].split('?')[0]   if link_el    else ''
 
-                if not link:
-                    continue
+                    if not link:
+                        continue
 
-                try:
-                    data_iso = data_el.get('datetime', '') if data_el else ''
-                    data_pub = datetime.strptime(data_iso, "%Y-%m-%d")
-                    data_f   = data_pub.strftime("%d/%m/%Y")
-                    hora_f   = "--:--"
-                except Exception:
-                    data_f, hora_f = "Sem data", "--:--"
+                    try:
+                        data_iso = data_el.get('datetime', '') if data_el else ''
+                        data_pub = datetime.strptime(data_iso, "%Y-%m-%d")
+                        data_f   = data_pub.strftime("%d/%m/%Y")
+                        hora_f   = "--:--"
+                    except Exception:
+                        data_f, hora_f = "Sem data", "--:--"
 
-                bloqueada, motivo = filtros_basicos(titulo, empresa)
-                if bloqueada:
-                    print(f"   {motivo}")
-                    continue
+                    bloqueada, motivo = filtros_basicos(titulo, empresa)
+                    if bloqueada:
+                        print(f"   {motivo}")
+                        continue
 
-                if ja_enviada(cursor, link):
-                    continue
+                    if ja_enviada(cursor, link):
+                        continue
 
-                nivel_match, techs = calcular_match(titulo)
-                techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar descrição"
+                    nivel_match, techs = calcular_match(titulo)
+                    techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar descrição"
 
-                mensagem = (
-                    f"🔷 <b>LINKEDIN — {filtro['nome']}</b>\n\n"
-                    f"💼 <b>Vaga:</b> {titulo}\n"
-                    f"🏢 <b>Empresa:</b> {empresa}\n"
-                    f"📅 <b>Data:</b> {data_f}\n"
-                    f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
-                    f"🔗 <a href='{link}'>Aplicar no LinkedIn</a>"
-                )
-                registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "LINKEDIN", nivel_match)
+                    mensagem = (
+                        f"🔷 <b>LINKEDIN — {filtro['nome']}</b>\n\n"
+                        f"💼 <b>Vaga:</b> {titulo}\n"
+                        f"🏢 <b>Empresa:</b> {empresa}\n"
+                        f"📅 <b>Data:</b> {data_f}\n"
+                        f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
+                        f"🔗 <a href='{link}'>Aplicar no LinkedIn</a>"
+                    )
+                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "LINKEDIN", nivel_match)
 
-        except Exception as e:
-            print(f"   ⚠️  Erro: {e}")
+                time.sleep(1)
+
+            except Exception as e:
+                print(f"   ⚠️  Erro: {e}")
+                break
 
 # --- 7. INHIRE ---
 
@@ -726,11 +736,7 @@ def buscar_vagas_solides(conn, cursor):
                         
                     # Tratamento do texto descritivo para enriquecer o match
                     description_raw = vaga.get('description', '')
-                    if BS4_DISPONIVEL and description_raw:
-                        description_limpa = BeautifulSoup(description_raw, 'html.parser').get_text(separator=' ')
-                    else:
-                        description_limpa = re.sub(r'<[^>]+>', ' ', description_raw)
-                        
+                    description_limpa = limpar_html(description_raw) if description_raw else ''
                     texto_para_match = f"{titulo} {description_limpa}"
                     nivel_match, techs = calcular_match(texto_para_match)
                     techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar descrição"
