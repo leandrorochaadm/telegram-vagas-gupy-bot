@@ -1,5 +1,7 @@
 import os
 import re
+import html
+import json
 import time
 import sqlite3
 import requests
@@ -111,11 +113,12 @@ EMPRESAS_INHIRE = [
     'nstech'
 ]
 
-# Solides: busca por título.
-# 'take' define quantas vagas por página (máx. recomendado: 14).
+# Solides: busca pela página pública vagas.solides.com.br/vagas/<modalidade>/<termo>.
+# 'caminho' = "<modalidade>/<termo>". A modalidade no caminho já filtra as vagas
+# (ex: "remoto/flutter" só traz vagas remotas). Atenção: "todos/<termo>" ignora o termo.
 FILTROS_SOLIDES = [
-    {"nome": "FLUTTER · REMOTO", "params": {'title': 'flutter', 'take': 14}},
-    # {"nome": "MOBILE · REMOTO",  "params": {'title': 'mobile',  'take': 14}},
+    {"nome": "FLUTTER · REMOTO", "caminho": "remoto/flutter"},
+    # {"nome": "MOBILE · REMOTO",  "caminho": "remoto/mobile"},
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -658,72 +661,98 @@ def buscar_vagas_inhire(conn, cursor):
 
 # --- 8. SOLIDES ---
 
+def _solides_flight(pagina_html):
+    """Junta os blocos self.__next_f.push(...) da página Next.js num texto só."""
+    partes = []
+    for bloco in re.findall(r'self\.__next_f\.push\((\[.*?\])\)</script>', pagina_html, re.S):
+        try:
+            item = json.loads(bloco)
+        except ValueError:
+            continue
+        if len(item) > 1 and isinstance(item[1], str):
+            partes.append(item[1])
+    return "".join(partes)
+
+def _solides_textos(flight):
+    """Mapeia id -> texto das linhas "<id>:T<tam>,<texto>" do payload RSC.
+
+    Essas linhas não terminam em quebra de linha: o tamanho (hex, em bytes UTF-8)
+    é a única forma segura de saber onde o texto acaba.
+    """
+    dados = flight.encode('utf-8')
+    textos, pos = {}, 0
+    # O id pode vir vazio (ex: ":HL[...]", dicas de pré-carregamento)
+    padrao_linha = re.compile(rb'([0-9a-f]*):(T([0-9a-f]+),)?')
+    while pos < len(dados):
+        m = padrao_linha.match(dados, pos)
+        if m and m.group(2):
+            fim = m.end() + int(m.group(3), 16)
+            textos[m.group(1).decode()] = dados[m.end():fim].decode('utf-8', errors='ignore')
+            pos = fim
+        else:
+            fim = dados.find(b'\n', pos)
+            pos = len(dados) if fim == -1 else fim + 1
+    return textos
+
+def _solides_descricao(textos, ref):
+    """A descrição vem inline ou como referência "$1e" para uma linha de texto."""
+    if isinstance(ref, str) and ref.startswith('$'):
+        return textos.get(ref[1:], '')
+    return ref or ''
+
+def _solides_pagina(caminho, pagina, headers):
+    """Retorna (vagas, total_paginas, textos) lidos da página pública da Solides."""
+    url = f"https://vagas.solides.com.br/vagas/{caminho}"
+    resp = requests.get(url, headers=headers, params={'page': pagina}, timeout=20)
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code}")
+    flight = _solides_flight(resp.text)
+    inicio = flight.find('"initialData":')
+    if inicio == -1:
+        raise RuntimeError("initialData não encontrado na página (layout mudou?)")
+    dados, _ = json.JSONDecoder().raw_decode(flight, inicio + len('"initialData":'))
+    return dados.get('data', []), dados.get('totalPages', 1), _solides_textos(flight)
+
 def buscar_vagas_solides(conn, cursor):
     print("\n🟢 SOLIDES — iniciando varredura...")
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     }
-    url_base = "https://apigw.solides.com.br/jobs/v3/portal-vacancies-new"
 
     for filtro in FILTROS_SOLIDES:
         print(f"\n   🔎 {filtro['nome']}...")
-        
+
         for pagina in range(1, 10):
-            params = filtro['params'].copy()
-            params['page'] = pagina
-            
             try:
-                resp = requests.get(url_base, headers=headers, params=params, timeout=15)
-                if resp.status_code != 200:
-                    print(f"   🛑 HTTP {resp.status_code}")
-                    break
-                    
-                json_data = resp.json()
-                if not json_data.get('success'):
-                    print("   🛑 Erro na resposta da Solides")
-                    break
-                    
-                dados = json_data.get('data', {})
-                vagas = dados.get('data', [])
-                total_pages = dados.get('totalPages', 1)
-                
+                vagas, total_pages, textos = _solides_pagina(filtro['caminho'], pagina, headers)
+
                 if not vagas:
                     print("   🔚 Sem mais vagas.")
                     break
-                    
+
                 for vaga in vagas:
-                    titulo = vaga.get('title', 'Título Indisponível')
-                    
-                    # Verificação de modalidade remota (se o filtro exigir)
-                    modelo_api = vaga.get('jobType', '').lower()
-                    if 'remoto' in filtro['nome'].lower() and modelo_api != 'remoto':
-                        continue
-                        
-                    link = vaga.get('redirectLink', '')
-                    if not link:
-                        continue
+                    # Campos podem vir null no JSON: .get(chave, padrão) não cobre esse caso
+                    titulo = (vaga.get('title') or 'Título Indisponível').strip()
 
-                    # Correção da URL da vaga Solides
-                    match_url = re.search(r'https://([^.]+)\.solides\.jobs/vacancies/(\d+)', link)
-                    if match_url:
-                        company_slug = match_url.group(1)
-                        vacancy_id = match_url.group(2)
-                        link = f"https://{company_slug}.vagas.solides.com.br/vaga/{vacancy_id}"
+                    slug     = vaga.get('slug')
+                    vaga_id  = vaga.get('id')
+                    if not slug or not vaga_id:
+                        continue
+                    link = f"https://{slug}.vagas.solides.com.br/vaga/{vaga_id}"
 
-                    empresa = vaga.get('companyName', 'Empresa não informada')
+                    empresa = (vaga.get('companyName') or 'Empresa não informada').strip()
                     bloqueada, motivo = filtros_basicos(titulo, empresa)
                     if bloqueada:
                         print(f"   {motivo}")
                         continue
-                        
+
                     if ja_enviada(cursor, link):
                         continue
-                    
+
                     data_iso = vaga.get('createdAt', '')
                     if data_iso:
                         try:
-                            # Tentar extrair "YYYY-MM-DD"
                             data_pub = datetime.strptime(data_iso[:10], "%Y-%m-%d")
                             data_f = data_pub.strftime("%d/%m/%Y")
                             if datetime.now() - data_pub > timedelta(days=DIAS_BUSCA_SOLIDES):
@@ -733,37 +762,37 @@ def buscar_vagas_solides(conn, cursor):
                             data_f = data_iso
                     else:
                         data_f = "Não informado"
-                        
-                    # Tratamento do texto descritivo para enriquecer o match
-                    description_raw = vaga.get('description', '')
+
+                    description_raw = _solides_descricao(textos, vaga.get('description'))
                     description_limpa = limpar_html(description_raw) if description_raw else ''
                     texto_para_match = f"{titulo} {description_limpa}"
                     nivel_match, techs = calcular_match(texto_para_match)
                     techs_str = " · ".join(t.upper() for t in techs[:4]) if techs else "Verificar descrição"
-                    
+
                     cidade_info = vaga.get('city') or {}
                     estado_info = vaga.get('state') or {}
-                    local = f"{cidade_info.get('name', '')} - {estado_info.get('code', '')}".strip(" -")
+                    local = f"{cidade_info.get('name') or ''} - {estado_info.get('code') or ''}".strip(" -")
                     if not local:
                         local = "Brasil"
-                        
+
+                    modelo_api = (vaga.get('jobType') or '').lower()
                     modelo = modelo_api.capitalize() if modelo_api else "Não informado"
-                    
+
                     mensagem = (
                         f"🟢 <b>SOLIDES — {filtro['nome']}</b>\n\n"
-                        f"💼 <b>Vaga:</b> {titulo}\n"
-                        f"🏢 <b>Empresa:</b> {empresa}\n"
-                        f"📍 <b>Local:</b> {local}\n"
+                        f"💼 <b>Vaga:</b> {html.escape(titulo)}\n"
+                        f"🏢 <b>Empresa:</b> {html.escape(empresa)}\n"
+                        f"📍 <b>Local:</b> {html.escape(local)}\n"
                         f"💻 <b>Modelo:</b> {modelo}\n"
                         f"📅 <b>Data:</b> {data_f}\n"
                         f"📊 <b>Match:</b> {nivel_match} · <i>{techs_str}</i>\n\n"
                         f"🔗 <a href='{link}'>Aplicar na Solides</a>"
                     )
                     registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "SOLIDES", nivel_match)
-                    
+
                 if pagina >= total_pages:
                     break
-                    
+
             except Exception as e:
                 print(f"   ⚠️  Erro: {e}")
                 break

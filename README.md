@@ -49,7 +49,7 @@ Salva histórico no banco SQLite (evita reenvio de vagas já vistas)
 | 🟣 **Gupy** | API JSON | Título + descrição completa |
 | 🔷 **LinkedIn** | API Guest (sem login) | Título da vaga |
 | 🟤 **ProgramaThor** | Web Scraping | Título + tags de tecnologia do card |
-| 🟢 **Solides** | API JSON | Título + descrição completa |
+| 🟢 **Solides** | Página pública (dados Next.js) | Título + descrição completa |
 | 🟣 **InHire** | API JSON | Título da vaga |
 
 > **Atenção:** para LinkedIn e InHire, tecnologias mencionadas somente na descrição da vaga **não são detectadas** pelo score de match — apenas o título é analisado.
