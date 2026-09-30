@@ -48,7 +48,7 @@ jobs:
         # installing the official cloudflare-warp package hangs on the runners).
         # Only the ProgramaThor requests use it. If it fails the bot still runs without a proxy.
         continue-on-error: true
-        timeout-minutes: 1
+        timeout-minutes: 2
         run: |
           # Pinned checksums: these binaries keep running while the bot step holds the secrets.
           curl -fsSL -o "$RUNNER_TEMP/wgcf" https://github.com/ViRb3/wgcf/releases/download/v2.3.0/wgcf_2.3.0_linux_amd64
@@ -66,9 +66,26 @@ jobs:
           # A cached account Cloudflare revoked: register a fresh one for this run
           "$RUNNER_TEMP/wgcf" generate >/dev/null || { register && "$RUNNER_TEMP/wgcf" generate >/dev/null; }
           printf 'WGConfig = %s/wgcf-profile.conf\n\n[Socks5]\nBindAddress = 127.0.0.1:40000\n' "$PWD" > wireproxy.conf
-          nohup "$RUNNER_TEMP/wireproxy" -c wireproxy.conf > wireproxy.log 2>&1 &
-          trace=$(timeout 30 bash -c 'until curl -fsS --max-time 5 --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace; do sleep 1; done') \
-            || { cat wireproxy.log; exit 1; }
+          # Some runs never get a WireGuard handshake back from the default endpoint:
+          # fall back to other WARP endpoint IPs/ports before giving up.
+          # engage.cloudflareclient.com resolves to 162.159.192.1, so that IP is only retried on other ports.
+          trace=""
+          for endpoint in engage.cloudflareclient.com:2408 162.159.193.1:2408 162.159.192.1:500 162.159.193.1:4500 162.159.192.1:1701; do
+            sed -i "s/^Endpoint = .*/Endpoint = $endpoint/" wgcf-profile.conf
+            grep -qx "Endpoint = $endpoint" wgcf-profile.conf
+            nohup "$RUNNER_TEMP/wireproxy" -c wireproxy.conf > wireproxy.log 2>&1 &
+            pid=$!
+            if trace=$(timeout 15 bash -c 'until curl -fsS --max-time 5 --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace; do sleep 1; done'); then
+              echo "endpoint=$endpoint"
+              break
+            fi
+            echo "No handshake via $endpoint"
+            # wireproxy may have already exited; under bash -e a failed kill would end the step
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            trace=""
+          done
+          [ -n "$trace" ] || { cat wireproxy.log; exit 1; }
           grep -E '^(ip|warp)=' <<<"$trace"
           grep -qx 'warp=on' <<<"$trace"
           echo "SCRAPER_PROXY=socks5h://127.0.0.1:40000" >> "$GITHUB_ENV"
