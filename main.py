@@ -9,6 +9,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
+import gupy
 import inhire_discovery
 import linkedin_posts
 import programathor
@@ -59,11 +60,11 @@ USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # ──────────────────────────────────────────────────────────────────────────────
 # "nome" é o label exibido no alerta do Telegram.
 
-# Gupy: busca por cargo (jobName) e modalidade (workplaceTypes).
-# workplaceTypes válidos: 'remote' | 'hybrid' | 'on-site'
+# Gupy: busca por cargo (jobName) e modalidade (workplaceType).
+# workplaceType válidos: 'remote' | 'hybrid' | 'on-site'
 FILTROS_GUPY = [
-    {"nome": "FLUTTER · REMOTO", "params": {'workplaceTypes': 'remote', 'jobName': 'flutter', 'limit': 15}},
-    # {"nome": "MOBILE · REMOTO",  "params": {'workplaceTypes': 'remote', 'jobName': 'mobile',  'limit': 10}},
+    {"nome": "FLUTTER · REMOTO", "params": {'workplaceType': 'remote', 'jobName': 'flutter', 'limit': 15}},
+    # {"nome": "MOBILE · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'mobile',  'limit': 10}},
 ]
 
 # ProgramaThor: busca por termo + slug de localidade da URL.
@@ -270,20 +271,6 @@ def titulo_relevante(titulo):
 
 # --- 3. BANCO E TELEGRAM ---
 
-TRADUCAO_MODELO = {
-    "on-site": "Presencial",
-    "hybrid":  "Híbrido",
-    "remote":  "Remoto",
-}
-
-TRADUCAO_TIPO_VAGA = {
-    "vacancy_type_effective":   "Efetivo",
-    "vacancy_type_apprentice":  "Jovem Aprendiz",
-    "vacancy_type_internship":  "Estágio",
-    "vacancy_type_temporary":   "Temporário",
-    "vacancy_type_freelancer":  "Freelancer",
-}
-
 def iniciar_banco():
     conn   = sqlite3.connect(CAMINHO_BANCO)
     cursor = conn.cursor()
@@ -481,97 +468,15 @@ def buscar_vagas_gupy(conn, cursor):
     varrer_com_aviso("GUPY", _varrer_gupy, conn, cursor)
 
 def _varrer_gupy(conn, cursor, erros):
-    headers = {
-        'User-Agent': USER_AGENT,
-        'Accept':     'application/json, text/plain, */*',
-        'Origin':     'https://portal.gupy.io',
-    }
-    url_api = "https://employability-portal.gupy.io/api/v1/jobs"
-
-    for filtro in FILTROS_GUPY:
-        print(f"\n   🔎 {filtro['nome']}...")
-        vagas_velhas  = 0
-        LIMITE_VELHAS = 20
-
-        for pagina in range(1, 36):
-            params = filtro['params'].copy()
-            params['offset'] = (pagina - 1) * params.get('limit', 10)
-
-            try:
-                resp = requests.get(url_api, headers=headers, params=params, timeout=15)
-                if resp.status_code != 200:
-                    print(f"   🛑 HTTP {resp.status_code}")
-                    erros.append(f"{filtro['nome']}: a Gupy recusou a busca ({resp.status_code}).")
-                    break
-
-                dados = resp.json().get('data', [])
-                if not dados:
-                    print("   🔚 Sem mais vagas.")
-                    break
-
-                for vaga in dados:
-                    link   = vaga.get('jobUrl', '')
-                    if not link:
-                        continue
-
-                    titulo  = vaga.get('name', 'Título Indisponível')
-                    empresa = vaga.get('careerPageName', 'Empresa não informada')
-                    local   = "Qualquer lugar (Remoto)" if 'REMOTO' in filtro['nome'] else f"{vaga.get('city', 'Não informado')} - {vaga.get('state', 'Não informado')}"
-                    modelo  = TRADUCAO_MODELO.get(vaga.get('workplaceType', ''), "Não informado")
-                    tipo    = TRADUCAO_TIPO_VAGA.get(vaga.get('type', ''), "Outros")
-                    pcd     = "Sim" if vaga.get('disabilities') else "Não informado"
-
-                    pais    = vaga.get('country', '')
-                    if pais and pais.lower() not in ['brasil', 'brazil', 'br']:
-                        continue
-
-                    data_iso = vaga.get('publishedDate', '')
-                    try:
-                        data_utc = datetime.strptime(data_iso.split('.')[0], "%Y-%m-%dT%H:%M:%S")
-                        data_brt = data_utc - timedelta(hours=3)
-                        data_f   = data_brt.strftime("%d/%m/%Y")
-                        hora_f   = data_brt.strftime("%H:%M")
-                        if datetime.now() - data_brt > timedelta(days=DIAS_BUSCA_GUPY):
-                            print(f"   📅 Vaga antiga ({data_f}). Encerrando busca.")
-                            vagas_velhas = LIMITE_VELHAS
-                            break
-                    except Exception:
-                        data_f, hora_f = "Sem data", "--:--"
-
-                    bloqueada, motivo = filtros_basicos(titulo, empresa)
-                    if bloqueada:
-                        print(f"   {motivo}")
-                        continue
-
-                    if ja_enviada(cursor, link):
-                        vagas_velhas += 1
-                        if vagas_velhas >= LIMITE_VELHAS:
-                            break
-                        continue
-
-                    vagas_velhas = 0
-
-                    mensagem = (
-                        f"🟣 <b>GUPY — {filtro['nome']}</b>\n\n"
-                        f"💼 <b>Vaga:</b> {escapar(titulo)}\n"
-                        f"🏢 <b>Empresa:</b> {escapar(empresa)}\n"
-                        f"📍 <b>Local:</b> {escapar(local)}\n"
-                        f"💻 <b>Modelo:</b> {modelo}\n"
-                        f"📄 <b>Tipo:</b> {tipo}\n"
-                        f"♿ <b>PCD:</b> {pcd}\n"
-                        f"📅 <b>Data:</b> {data_f} às {hora_f}\n\n"
-                        f"🔗 <a href='{escapar(link)}'>Aplicar na Gupy</a>"
-                    )
-                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "GUPY")
-
-                if vagas_velhas >= LIMITE_VELHAS:
-                    print("   🛑 Encerrando paginação.")
-                    break
-
-            except Exception as e:
-                print(f"   ⚠️  Erro: {e}")
-                erros.append(descrever_falha(filtro['nome'], e))
-                break
+    gupy.search_jobs(
+        conn, cursor,
+        filters=FILTROS_GUPY,
+        max_age_days=DIAS_BUSCA_GUPY,
+        user_agent=USER_AGENT,
+        check=filtros_basicos,
+        send=registrar_e_enviar,
+        errors=erros,
+    )
 
 # --- 5. PROGRAMATHOR ---
 

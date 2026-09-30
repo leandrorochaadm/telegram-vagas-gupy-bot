@@ -127,16 +127,18 @@ O campo `"nome"` é apenas o label que aparece no cabeçalho do alerta no Telegr
 
 ```python
 FILTROS_GUPY = [
-    {"nome": "FLUTTER · REMOTO", "params": {'workplaceTypes': 'remote', 'jobName': 'flutter', 'limit': 10}},
-    {"nome": "MOBILE · REMOTO",  "params": {'workplaceTypes': 'remote', 'jobName': 'mobile',  'limit': 10}},
+    {"nome": "FLUTTER · REMOTO", "params": {'workplaceType': 'remote', 'jobName': 'flutter', 'limit': 10}},
+    {"nome": "MOBILE · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'mobile',  'limit': 10}},
 ]
 ```
 
 | Campo | Descrição | Valores válidos |
 |---|---|---|
 | `jobName` | Termo de busca (cargo/tecnologia) | qualquer string |
-| `workplaceTypes` | Modalidade de trabalho | `'remote'` · `'hybrid'` · `'on-site'` |
+| `workplaceType` | Modalidade de trabalho | `'remote'` · `'hybrid'` · `'on-site'` |
 | `limit` | Vagas por página | inteiro (recomendado: 10) |
+
+O código fica em `gupy.py`; o `main.py` só passa as configurações.
 
 ---
 
