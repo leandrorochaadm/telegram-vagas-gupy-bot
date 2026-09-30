@@ -153,6 +153,8 @@ FILTROS_PROGRAMATHOR = [
 | `termo` | Termo de busca | qualquer string |
 | `local_filtro` | Filtro de localização | `'remoto'` · `'sp'` |
 
+Todos os níveis (júnior, pleno, sênior) entram; o filtro é só o termo no título. O código fica em `programathor.py`; o `main.py` só passa as configurações.
+
 ---
 
 #### `FILTROS_LINKEDIN`
