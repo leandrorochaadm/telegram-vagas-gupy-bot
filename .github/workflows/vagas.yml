@@ -35,30 +35,24 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Conectar Cloudflare WARP
-        # ProgramaThor's Cloudflare blocks GitHub's datacenter IPs (403); WARP's proxy mode
-        # routes only the ProgramaThor requests through a consumer IP.
-        # If it fails the bot still runs without a proxy.
+        # ProgramaThor's Cloudflare blocks GitHub's datacenter IPs (403). wgcf registers a free
+        # WARP account and wireproxy exposes it as a local SOCKS proxy (userspace, no apt:
+        # installing the official cloudflare-warp package hangs on the runners).
+        # Only the ProgramaThor requests use it. If it fails the bot still runs without a proxy.
         continue-on-error: true
-        timeout-minutes: 4
+        timeout-minutes: 1
         run: |
           set -x
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
-            | sudo gpg --yes --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
-            | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          # Refresh only the WARP repo: a full apt update alone can eat most of the step budget.
-          sudo apt-get update -qq \
-            -o Dir::Etc::sourcelist=sources.list.d/cloudflare-client.list \
-            -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends cloudflare-warp
-          timeout 30 bash -c 'until warp-cli --accept-tos status >/dev/null 2>&1; do sleep 1; done'
-          warp-cli --accept-tos registration new
-          warp-cli --accept-tos mode proxy
-          warp-cli --accept-tos proxy port 40000
-          warp-cli --accept-tos connect
-          timeout 45 bash -c 'until warp-cli --accept-tos status | grep -q Connected; do sleep 1; done' \
-            || { warp-cli --accept-tos status; exit 1; }
-          trace=$(curl -fsS --max-time 15 --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace)
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.3.0/wgcf_2.3.0_linux_amd64
+          curl -fsSL https://github.com/whyvl/wireproxy/releases/download/v1.1.3/wireproxy_linux_amd64.tar.gz | tar -xz wireproxy
+          chmod +x wgcf wireproxy
+          ./wgcf register --accept-tos
+          ./wgcf generate
+          printf 'WGConfig = %s/wgcf-profile.conf\n\n[Socks5]\nBindAddress = 127.0.0.1:40000\n' "$PWD" > wireproxy.conf
+          nohup ./wireproxy -c wireproxy.conf > wireproxy.log 2>&1 &
+          trace=$(timeout 30 bash -c 'until curl -fsS --max-time 5 --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace; do sleep 1; done') \
+            || { cat wireproxy.log; exit 1; }
           grep -E '^(ip|warp)=' <<<"$trace"
           grep -qx 'warp=on' <<<"$trace"
           echo "SCRAPER_PROXY=socks5h://127.0.0.1:40000" >> "$GITHUB_ENV"
