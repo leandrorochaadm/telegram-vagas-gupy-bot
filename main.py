@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import inhire_discovery
 import linkedin_posts
 import programathor
+import remotar
 import web_search
 
 try:
@@ -108,9 +109,9 @@ FILTROS_WEB = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter remoto"},
 ]
 PAGINAS_WEB = 1
-# Domínios fora da busca na web (subdomínios inclusos). O LinkedIn já tem
-# busca própria (vagas e publicações), então ficaria repetido.
-SITES_EXCLUIDOS_WEB = ["linkedin.com"]
+# Domínios fora da busca na web (subdomínios inclusos). LinkedIn e Remotar já têm
+# busca própria, então ficariam repetidos (o link da web é outro e passaria como vaga nova).
+SITES_EXCLUIDOS_WEB = ["linkedin.com", "remotar.com.br"]
 # Mesma regra de TERMOS_OBRIGATORIOS_POSTS, sem exigir "vaga": páginas de vaga
 # costumam ter só o cargo no título ("Desenvolvedor Flutter · Remoto").
 TERMOS_OBRIGATORIOS_WEB = [
@@ -209,6 +210,15 @@ FILTROS_SOLIDES = [
     # {"nome": "MOBILE · REMOTO",  "caminho": "remoto/mobile"},
 ]
 
+# Remotar: busca pela API pública (api.remotar.com.br). A busca também olha a
+# descrição, mas só vai para o grupo quem tiver TERMO_OBRIGATORIO_TITULO no título.
+# 'modalidades': "remote" | "hybrid" | "on-site" (lista vazia = qualquer uma).
+FILTROS_REMOTAR = [
+    {"nome": "FLUTTER · REMOTO", "termo": "flutter", "modalidades": ["remote"]},
+]
+# Ignora vagas remotas de empresas de fora do Brasil (salário em dólar/euro ou marcadas como internacionais).
+IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR = True
+
 # ──────────────────────────────────────────────────────────────────────────────
 # B. PERFIL — palavras-chave e empresas que bloqueiam a vaga
 # ──────────────────────────────────────────────────────────────────────────────
@@ -218,6 +228,7 @@ FILTROS_SOLIDES = [
 # (ex: 30 dias), depois retorne ao padrão.
 DIAS_BUSCA_GUPY    = 10   # Gupy    → padrão: 10 dias
 DIAS_BUSCA_SOLIDES = 20  # Solides → padrão: 20 dias
+DIAS_BUSCA_REMOTAR = 30  # Remotar → padrão: 30 dias
 
 # A vaga só é enviada se o título contiver este termo (palavra inteira,
 # case-insensitive). É o único filtro aplicado ao título.
@@ -976,6 +987,24 @@ def _varrer_solides(conn, cursor, erros):
                 erros.append(descrever_falha(filtro['nome'], e))
                 break
 
+# --- 9. REMOTAR ---
+
+def buscar_vagas_remotar(conn, cursor):
+    print("\n🟠 REMOTAR — iniciando varredura...")
+    varrer_com_aviso("REMOTAR", _varrer_remotar, conn, cursor)
+
+def _varrer_remotar(conn, cursor, erros):
+    remotar.search_jobs(
+        conn, cursor,
+        filters=FILTROS_REMOTAR,
+        max_age_days=DIAS_BUSCA_REMOTAR,
+        ignore_foreign=IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR,
+        user_agent=USER_AGENT,
+        check=filtros_basicos,
+        send=registrar_e_enviar,
+        errors=erros,
+    )
+
 # --- MAIN ---
 
 def buscar_vagas_web(conn, cursor):
@@ -1029,6 +1058,7 @@ def main():
     buscar_posts_linkedin(conn, cursor)
     buscar_vagas_inhire(conn, cursor)
     buscar_vagas_solides(conn, cursor)
+    buscar_vagas_remotar(conn, cursor)
     # Last: dedicated sources send richer messages for the same links
     buscar_vagas_web(conn, cursor)
     anotar_falhas_envio()

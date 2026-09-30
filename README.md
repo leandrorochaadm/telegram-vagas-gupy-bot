@@ -1,7 +1,7 @@
 # 🤖 Multi-Source Job Tracker: Automação de Vagas para Devs no Telegram
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
-[![Sources](https://img.shields.io/badge/Fontes-Gupy%20%7C%20LinkedIn%20%7C%20ProgramaThor%20%7C%20Solides%20%7C%20InHire-orange)]()
+[![Sources](https://img.shields.io/badge/Fontes-Gupy%20%7C%20LinkedIn%20%7C%20ProgramaThor%20%7C%20Solides%20%7C%20InHire%20%7C%20Remotar-orange)]()
 [![Telegram](https://img.shields.io/badge/Alertas-Telegram-2CA5E0)]()
 [![GitHub Actions](https://img.shields.io/badge/Automação-GitHub%20Actions-181717?logo=github)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -29,7 +29,7 @@ Bot que monitora vagas de emprego em múltiplas plataformas e envia alertas form
 ```
 GitHub Actions (agendado automaticamente)
     ↓
-Varre Gupy + LinkedIn + ProgramaThor + Solides + InHire
+Varre Gupy + LinkedIn + ProgramaThor + Solides + InHire + Remotar
     ↓
 Aplica filtros de perfil (termo obrigatório no título, empresas ignoradas)
     ↓
@@ -49,6 +49,7 @@ Salva histórico no banco SQLite (evita reenvio de vagas já vistas)
 | 🟤 **ProgramaThor** | Web Scraping |
 | 🟢 **Solides** | Página pública (dados Next.js) |
 | 🟣 **InHire** | API JSON |
+| 🟠 **Remotar** | API JSON |
 
 
 ---
@@ -157,6 +158,25 @@ Todos os níveis (júnior, pleno, sênior) entram; o filtro é só o termo no t�
 
 ---
 
+#### `FILTROS_REMOTAR`
+
+```python
+FILTROS_REMOTAR = [
+    {"nome": "FLUTTER · REMOTO", "termo": "flutter", "modalidades": ["remote"]},
+]
+IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR = True
+DIAS_BUSCA_REMOTAR = 30
+```
+
+| Campo | Descrição | Valores válidos |
+|---|---|---|
+| `termo` | Termo de busca (o Remotar também procura na descrição) | qualquer string |
+| `modalidades` | Modalidades aceitas (lista vazia = qualquer uma) | `'remote'` · `'hybrid'` · `'on-site'` |
+
+A busca do Remotar também traz vagas que só citam o termo na descrição; só vai para o grupo quem tiver `TERMO_OBRIGATORIO_TITULO` no título. Com `IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR = True`, vagas de empresas de fora do Brasil (salário em dólar/euro ou marcadas como "Vaga internacional") ficam de fora. Vagas publicadas há mais de `DIAS_BUSCA_REMOTAR` dias são ignoradas. O código fica em `remotar.py`.
+
+---
+
 #### `FILTROS_LINKEDIN`
 
 ```python
@@ -212,7 +232,7 @@ FILTROS_WEB = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter remoto"},
 ]
 PAGINAS_WEB = 1
-SITES_EXCLUIDOS_WEB = ["linkedin.com"]
+SITES_EXCLUIDOS_WEB = ["linkedin.com", "remotar.com.br"]
 TERMOS_OBRIGATORIOS_WEB = [
     ["flutter"],
     ["remoto", "remota", "home office", "home-office", "homeoffice"],
@@ -225,7 +245,7 @@ INTERVALO_WEB_MIN = 180
 - `TERMOS_BLOQUEADOS_WEB`: a página é descartada se tiver qualquer um desses termos. Um texto como "100% remoto, sem presencial" também cai fora.
 - `DIAS_WEB`: até quantos dias atrás buscar. Em 24h quase nada sobre Flutter aparece na web, então o padrão é a última semana. Cada vaga é enviada uma vez só, então não há repetição. A Brave só filtra por dia, semana, mês ou ano.
 
-`SITES_EXCLUIDOS_WEB` tira domínios da busca (com `-site:` na consulta da Brave), incluindo subdomínios. O LinkedIn fica de fora porque já tem busca própria.
+`SITES_EXCLUIDOS_WEB` tira domínios da busca (com `-site:` na consulta da Brave), incluindo subdomínios. LinkedIn e Remotar ficam de fora porque já têm busca própria.
 
 Cada filtro × página também gasta 1 consulta da cota da Brave, somada às publicações do LinkedIn.
 
@@ -373,7 +393,7 @@ Quando algo dá errado, o bot avisa no próprio grupo. Os problemas de todas as 
 
 O que entra no aviso:
 
-- **Busca recusada ou sem resposta** em qualquer fonte (Gupy, ProgramaThor, LinkedIn, InHire, Solides, web). Ex.: página da Solides que mudou de formato. Quando o LinkedIn pede uma pausa (excesso de buscas), o bot espera `PAUSA_NOVA_TENTATIVA_LINKEDIN` segundos e tenta de novo antes de avisar.
+- **Busca recusada ou sem resposta** em qualquer fonte (Gupy, ProgramaThor, LinkedIn, InHire, Solides, Remotar, web). Ex.: página da Solides que mudou de formato. Quando o LinkedIn pede uma pausa (excesso de buscas), o bot espera `PAUSA_NOVA_TENTATIVA_LINKEDIN` segundos e tenta de novo antes de avisar.
 - **Cota da Brave esgotada** nas publicações do LinkedIn e na busca na web.
 - **Erro inesperado**: a fonte para e as outras continuam rodando.
 - **Vagas que o Telegram não entregou**: não ficam marcadas como enviadas e voltam na próxima execução. Quando o Telegram pede para esperar (limite de 20 mensagens por minuto num grupo), o bot espera e tenta de novo; entre uma vaga e outra ele já espera `PAUSA_ENTRE_VAGAS` segundos.
