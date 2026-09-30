@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import inhire_discovery
 import linkedin_posts
+import programathor
 import web_search
 
 try:
@@ -571,99 +572,15 @@ def _varrer_programathor(conn, cursor, erros):
     if not BS4_DISPONIVEL:
         print("   ⚠️  ProgramaThor desativado: instale beautifulsoup4")
         return
-
-    headers = {
-        'User-Agent':      USER_AGENT,
-        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9',
-    }
-
-    proxies = {'http': SCRAPER_PROXY, 'https': SCRAPER_PROXY} if SCRAPER_PROXY else None
-
-    for filtro in FILTROS_PROGRAMATHOR:
-        print(f"\n   🔎 {filtro['nome']}...")
-
-        # Monta URL base: /jobs-{termo}/{local_filtro} ou /jobs-{termo} se sem local
-        termo        = filtro["termo"].lower()
-        local_filtro = filtro.get("local_filtro", "")
-        base_url     = f"https://programathor.com.br/jobs-{termo}/{local_filtro}" if local_filtro else f"https://programathor.com.br/jobs-{termo}"
-
-        for pagina in range(1, 6):
-            params = {} if pagina == 1 else {"page": pagina}
-
-            try:
-                resp = requests.get(base_url, params=params, headers=headers, timeout=15, proxies=proxies)
-                if resp.status_code != 200:
-                    print(f"   🛑 HTTP {resp.status_code}")
-                    erros.append(f"{filtro['nome']}: o ProgramaThor recusou a busca ({resp.status_code}).")
-                    break
-
-                soup  = BeautifulSoup(resp.text, 'html.parser')
-                cards = soup.find_all('div', class_='cell-list')
-
-                if not cards:
-                    print("   🔚 Sem mais vagas.")
-                    break
-
-                novos_na_pagina = 0
-
-                for card in cards:
-                    link_el = card.find('a', href=lambda h: h and '/jobs/' in h)
-                    if not link_el:
-                        continue
-
-                    link = "https://programathor.com.br" + link_el['href']
-
-                    titulo_el = card.find('h3')
-                    titulo_raw = titulo_el.get_text(strip=True) if titulo_el else ""
-                    if 'Vencida' in titulo_raw or 'vencida' in titulo_raw:
-                        continue
-                    titulo = titulo_raw.replace('NOVA', '').strip() or "Título Indisponível"
-
-                    spans   = card.select('.cell-list-content-icon span')
-                    empresa = spans[0].get_text(strip=True) if len(spans) > 0 else "Empresa não informada"
-                    local   = spans[1].get_text(strip=True) if len(spans) > 1 else ""
-                    salario = spans[3].get_text(strip=True) if len(spans) > 3 else ""
-                    nivel   = spans[4].get_text(strip=True) if len(spans) > 4 else ""
-                    tipo    = spans[5].get_text(strip=True) if len(spans) > 5 else ""
-                    tags    = [t.get_text(strip=True) for t in card.select('span.tag-list')]
-
-                    # Filtros básicos (termo obrigatório no título ou empresa ignorada)
-                    bloqueada, motivo = filtros_basicos(titulo, empresa)
-                    if bloqueada:
-                        print(f"   {motivo}")
-                        continue
-
-                    if ja_enviada(cursor, link):
-                        continue
-
-                    novos_na_pagina += 1
-
-                    tags_str  = ", ".join(tags[:6]) if tags else ""
-
-                    mensagem = (
-                        f"🟤 <b>PROGRAMATHOR — {filtro['nome']}</b>\n\n"
-                        f"💼 <b>Vaga:</b> {escapar(titulo)}\n"
-                        f"🏢 <b>Empresa:</b> {escapar(empresa)}\n"
-                        f"📍 <b>Local:</b> {escapar(local)}\n"
-                        f"📄 <b>Nível:</b> {escapar(nivel)}"
-                        + (f" · {escapar(tipo)}" if tipo else "") + "\n"
-                        + (f"💰 <b>Salário:</b> {escapar(salario)}\n" if salario else "")
-                        + (f"🛠️  <b>Stack:</b> <i>{escapar(tags_str)}</i>\n" if tags_str else "")
-                        + "\n"
-                        f"🔗 <a href='{escapar(link)}'>Aplicar no ProgramaThor</a>"
-                    )
-                    registrar_e_enviar(conn, cursor, link, titulo, empresa, datetime.now().strftime("%d/%m/%Y"), mensagem, "PROGRAMATHOR")
-
-                if novos_na_pagina == 0:
-                    break
-
-                time.sleep(1)
-
-            except Exception as e:
-                print(f"   ⚠️  Erro: {e}")
-                erros.append(descrever_falha(filtro['nome'], e))
-                break
+    programathor.search_jobs(
+        conn, cursor,
+        filters=FILTROS_PROGRAMATHOR,
+        user_agent=USER_AGENT,
+        proxy=SCRAPER_PROXY,
+        check=filtros_basicos,
+        send=registrar_e_enviar,
+        errors=erros,
+    )
 
 # --- 6. LINKEDIN ---
 
