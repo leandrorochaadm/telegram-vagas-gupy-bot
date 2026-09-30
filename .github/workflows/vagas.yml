@@ -34,6 +34,14 @@ jobs:
       - name: Instalar dependências
         run: pip install -r requirements.txt
 
+      # Reuse one WARP account across runs instead of registering a new one every 30 min
+      # (Cloudflare rate-limits registrations). Bump the key to force a fresh account.
+      - name: Restaurar conta WARP
+        uses: actions/cache@v4
+        with:
+          path: ~/.wgcf
+          key: wgcf-account-v1
+
       - name: Conectar Cloudflare WARP
         # ProgramaThor's Cloudflare blocks GitHub's datacenter IPs (403). wgcf registers a free
         # WARP account and wireproxy exposes it as a local SOCKS proxy (userspace, no apt:
@@ -42,15 +50,23 @@ jobs:
         continue-on-error: true
         timeout-minutes: 1
         run: |
-          set -x
-          cd "$RUNNER_TEMP"
-          curl -fsSL -o wgcf https://github.com/ViRb3/wgcf/releases/download/v2.3.0/wgcf_2.3.0_linux_amd64
-          curl -fsSL https://github.com/whyvl/wireproxy/releases/download/v1.1.3/wireproxy_linux_amd64.tar.gz | tar -xz wireproxy
-          chmod +x wgcf wireproxy
-          ./wgcf register --accept-tos
-          ./wgcf generate
+          # Pinned checksums: these binaries keep running while the bot step holds the secrets.
+          curl -fsSL -o "$RUNNER_TEMP/wgcf" https://github.com/ViRb3/wgcf/releases/download/v2.3.0/wgcf_2.3.0_linux_amd64
+          curl -fsSL -o "$RUNNER_TEMP/wireproxy.tgz" https://github.com/whyvl/wireproxy/releases/download/v1.1.3/wireproxy_linux_amd64.tar.gz
+          sha256sum -c - <<EOF
+          01614e38c0eb5f3405232e71cfaf02d64d4809e4988ad8f5a8071af16d193405  $RUNNER_TEMP/wgcf
+          e88c1d090740373fc606c1bafd81d9a5eadc642cce5667616e20e9d7a444f51c  $RUNNER_TEMP/wireproxy.tgz
+          EOF
+          tar -xzf "$RUNNER_TEMP/wireproxy.tgz" -C "$RUNNER_TEMP" wireproxy
+          chmod +x "$RUNNER_TEMP/wgcf" "$RUNNER_TEMP/wireproxy"
+          mkdir -p ~/.wgcf && cd ~/.wgcf
+          # Public repo: keep account/device ids out of the log
+          register() { rm -f wgcf-account.toml && "$RUNNER_TEMP/wgcf" register --accept-tos >/dev/null; }
+          [ -f wgcf-account.toml ] || register
+          # A cached account Cloudflare revoked: register a fresh one for this run
+          "$RUNNER_TEMP/wgcf" generate >/dev/null || { register && "$RUNNER_TEMP/wgcf" generate >/dev/null; }
           printf 'WGConfig = %s/wgcf-profile.conf\n\n[Socks5]\nBindAddress = 127.0.0.1:40000\n' "$PWD" > wireproxy.conf
-          nohup ./wireproxy -c wireproxy.conf > wireproxy.log 2>&1 &
+          nohup "$RUNNER_TEMP/wireproxy" -c wireproxy.conf > wireproxy.log 2>&1 &
           trace=$(timeout 30 bash -c 'until curl -fsS --max-time 5 --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace; do sleep 1; done') \
             || { cat wireproxy.log; exit 1; }
           grep -E '^(ip|warp)=' <<<"$trace"
