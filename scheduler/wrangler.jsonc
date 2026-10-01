@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "vagas-bot-scheduler",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+
+  // Cloudflare crons are always UTC; Brasília is UTC-3 (no daylight saving)
+  "triggers": {
+    "crons": [
+      "0 11-23/2 * * MON-FRI", // Mon-Fri every 2h: 8h, 10h ... 20h (BRT)
+      "0 13-21/4 * * SAT,SUN"  // Sat-Sun every 4h: 10h, 14h, 18h (BRT)
+    ]
+  },
+
+  // GITHUB_TOKEN is a secret: `npx wrangler secret put GITHUB_TOKEN`
+  // It needs Actions: Read and write on this repo
+
+  "workers_dev": false,
+  "observability": { "enabled": true }
+}
