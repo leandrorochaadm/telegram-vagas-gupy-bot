@@ -247,6 +247,7 @@ class SourceErrorsTest(AlertTestCase):
             errors.append("código 429")
             return []
         with mock.patch.object(main, "BRAVE_API_KEY", "key"), \
+             mock.patch.object(main, "LINKEDIN_LI_AT", None), \
              mock.patch.object(main, "FILTROS_POSTS_LINKEDIN", [{"nome": "POSTS", "termo": "flutter"}]), \
              mock.patch.object(main.linkedin_posts, "search_posts", side_effect=refuse):
             main.buscar_posts_linkedin(self.conn, self.cursor)

@@ -21,6 +21,8 @@ concurrency:
 jobs:
   buscar-vagas:
     runs-on: ubuntu-latest
+    env:
+      HAS_LINKEDIN_LI_AT: ${{ secrets.LINKEDIN_LI_AT != '' }}
 
     steps:
       - name: Checkout repositório
@@ -33,6 +35,15 @@ jobs:
 
       - name: Instalar dependências
         run: pip install -r requirements.txt
+
+      # Headless browser for the logged-in LinkedIn posts search (LINKEDIN_LI_AT).
+      # Only when the secret exists; the step gets a true/false flag, never the cookie.
+      # If it fails the bot still runs: posts fall back to the Brave search.
+      - name: Instalar navegador do Playwright
+        if: env.HAS_LINKEDIN_LI_AT == 'true'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: python -m playwright install --with-deps chromium
 
       # Reuse one WARP account across runs instead of registering a new one every 30 min
       # (Cloudflare rate-limits registrations). Bump the key to force a fresh account.
@@ -95,6 +106,7 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          LINKEDIN_LI_AT: ${{ secrets.LINKEDIN_LI_AT }}
         run: python main.py
 
       - name: Salvar banco de dados atualizado

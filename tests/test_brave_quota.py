@@ -95,7 +95,7 @@ class BuscarPostsLinkedinTest(unittest.TestCase):
         self.addCleanup(self.conn.close)
 
     def test_second_run_inside_interval_skips_search(self):
-        with mock.patch.object(main, "BRAVE_API_KEY", "key"):
+        with mock.patch.object(main, "BRAVE_API_KEY", "key"), mock.patch.object(main, "LINKEDIN_LI_AT", None):
             main.buscar_posts_linkedin(self.conn, self.cursor)
             main.buscar_posts_linkedin(self.conn, self.cursor)
         self.assertEqual(self.search_posts.call_count, len(main.FILTROS_POSTS_LINKEDIN))

@@ -129,6 +129,8 @@ class BuscarPostsLinkedinTest(unittest.TestCase):
         main._enviados_sessao.clear()
         patches = [
             mock.patch.object(main, "BRAVE_API_KEY", "key"),
+            # A cookie in the local .env would open a real browser (see test_linkedin_login.py)
+            mock.patch.object(main, "LINKEDIN_LI_AT", None),
             mock.patch.object(main, "enviar_telegram"),
             mock.patch.object(main.time, "sleep"),
         ]

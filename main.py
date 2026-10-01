@@ -1,5 +1,6 @@
 import os
 import re
+import hashlib
 import html
 import json
 import time
@@ -11,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import gupy
 import inhire_discovery
+import linkedin_login
 import linkedin_posts
 import programathor
 import remotar
@@ -45,6 +47,8 @@ carregar_env()
 TOKEN   = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID_GRUPO")
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
+# li_at cookie of a logged-in LinkedIn session: posts come from LinkedIn's own search
+LINKEDIN_LI_AT = os.getenv("LINKEDIN_LI_AT")
 # Set by the workflow to WARP's local SOCKS proxy: Cloudflare blocks the runners' datacenter IPs
 SCRAPER_PROXY = os.getenv("SCRAPER_PROXY")
 
@@ -99,6 +103,29 @@ PAGINAS_POSTS_LINKEDIN = 1
 # Intervalo mínimo entre buscas de publicações. O bot roda a cada 30 min, mas a
 # cota da Brave (~1.000/mês) só aguenta ~500 buscas: de hora em hora gasta ~360.
 INTERVALO_POSTS_LINKEDIN_MIN = 60
+
+# Com LINKEDIN_LI_AT (cookie de login), as publicações vêm da busca do próprio
+# LinkedIn (código em linkedin_login.py) e a Brave vira reserva: só é usada sem
+# cookie ou com o cookie caído. É a mesma busca da aba "Publicações" do site.
+# O termo pode ser mais amplo que o da Brave: com login vem o texto inteiro, e
+# TERMOS_OBRIGATORIOS_POSTS (flutter + vaga + remoto) filtra depois.
+FILTROS_POSTS_LINKEDIN_LOGIN = [
+    {"nome": "FLUTTER · VAGA · REMOTO", "termo": "flutter vaga"},
+]
+# Período da busca logada: "past-24h" | "past-week" | "past-month".
+# Como a página só mostra tempo relativo ("2 d"), a data da mensagem é a do dia
+# em que o bot achou a publicação.
+PERIODO_POSTS_LINKEDIN_LOGIN = "past-24h"
+# Cada rolagem carrega mais um lote de publicações na página de resultados.
+ROLAGENS_POSTS_LINKEDIN = 2
+# Intervalo mínimo entre buscas logadas: buscar a cada 30 min chama atenção do LinkedIn.
+INTERVALO_POSTS_LINKEDIN_LOGIN_MIN = 60
+# Com o cookie caído, o bot para de abrir o LinkedIn até o secret mudar. A cada
+# INTERVALO_LEMBRETE_COOKIE_HORAS ele tenta uma vez: se o mesmo cookie voltou a
+# valer (ex.: verificação de segurança resolvida no navegador), a busca volta
+# sozinha; se não, repete o aviso.
+INTERVALO_LEMBRETE_COOKIE_HORAS = 24
+AVISO_COOKIE_LINKEDIN = "O login do LinkedIn expirou. Atualize o cookie (secret LINKEDIN_LI_AT)."
 
 # Web toda — páginas das últimas 24h em qualquer site (blogs, portais de vagas,
 # sites de empresas...), também via Brave Search (código em web_search.py).
@@ -586,16 +613,119 @@ def _varrer_linkedin(conn, cursor, erros):
 # --- 6b. LINKEDIN (PUBLICAÇÕES) ---
 
 def buscar_posts_linkedin(conn, cursor):
-    if not BRAVE_API_KEY:
-        print("\n⚠️  Publicações do LinkedIn desativadas: defina BRAVE_API_KEY no .env")
+    if not LINKEDIN_LI_AT and not BRAVE_API_KEY:
+        print("\n⚠️  Publicações do LinkedIn desativadas: defina LINKEDIN_LI_AT ou BRAVE_API_KEY no .env")
         return
 
     print("\n📝 LINKEDIN PUBLICAÇÕES — iniciando varredura...")
     varrer_com_aviso("LINKEDIN PUBLICAÇÕES", _varrer_posts_linkedin, conn, cursor)
 
 def _varrer_posts_linkedin(conn, cursor, erros):
-    if not brave_due(conn, cursor, "LINKEDIN PUBLICAÇÕES", INTERVALO_POSTS_LINKEDIN_MIN):
-        return
+    if LINKEDIN_LI_AT:
+        estado = estado_login_linkedin(conn, cursor, LINKEDIN_LI_AT)
+        if estado == "espera":
+            return
+        if estado == "ok" and _posts_com_login(conn, cursor, erros):
+            return
+    # Sem cookie, com o cookie caído ou sem Playwright: a Brave é a reserva
+    if BRAVE_API_KEY and brave_due(conn, cursor, "LINKEDIN PUBLICAÇÕES", INTERVALO_POSTS_LINKEDIN_MIN):
+        _posts_pela_brave(conn, cursor, erros)
+
+def _hash_cookie(cookie):
+    # Only a fingerprint goes to the db: it is committed to a public repo
+    return hashlib.sha256(cookie.encode()).hexdigest()[:16]
+
+def estado_login_linkedin(conn, cursor, cookie, agora=None):
+    """"ok" (pode buscar agora), "espera" (dentro do intervalo) ou "expirado" (pausado).
+
+    Com o cookie caído, devolve "ok" uma vez a cada INTERVALO_LEMBRETE_COOKIE_HORAS
+    para tentar de novo: se falhar, marcar_login_expirado repete o aviso.
+    Um cookie novo (secret trocado) recomeça do zero.
+    """
+    # UTC for the same reason as enviar_avisos: the db travels between GitHub and local runs
+    agora = agora or datetime.now(timezone.utc)
+    agora_iso = agora.isoformat(timespec="seconds")
+    chave = _hash_cookie(cookie)
+    cursor.execute("CREATE TABLE IF NOT EXISTS linkedin_session "
+                   "(cookie_hash TEXT PRIMARY KEY, searched_at TEXT, expired_at TEXT, reminded_at TEXT)")
+    cursor.execute("DELETE FROM linkedin_session WHERE cookie_hash != ?", (chave,))
+    linha = cursor.execute("SELECT searched_at, expired_at, reminded_at FROM linkedin_session "
+                           "WHERE cookie_hash = ?", (chave,)).fetchone()
+    conn.commit()
+    folga = timedelta(minutes=FOLGA_INTERVALO_BRAVE_MIN)
+
+    if linha and linha[1]:
+        lembrete = timedelta(hours=INTERVALO_LEMBRETE_COOKIE_HORAS) - folga
+        if agora - datetime.fromisoformat(linha[2]) < lembrete:
+            print("\n🔒 LinkedIn: cookie de login expirado, busca logada pausada até o secret mudar")
+            return "expirado"
+        print(f"\n🔁 LinkedIn: cookie expirado há {INTERVALO_LEMBRETE_COOKIE_HORAS}h, tentando de novo")
+        # Saved before searching: a retry that fails for another reason waits another day
+        cursor.execute("UPDATE linkedin_session SET searched_at = ?, reminded_at = ? WHERE cookie_hash = ?",
+                       (agora_iso, agora_iso, chave))
+        conn.commit()
+        return "ok"
+
+    espera = timedelta(minutes=INTERVALO_POSTS_LINKEDIN_LOGIN_MIN) - folga
+    if linha and linha[0] and agora - datetime.fromisoformat(linha[0]) < espera:
+        print(f"\n⏳ LinkedIn: busca logada pulada (uma a cada {INTERVALO_POSTS_LINKEDIN_LOGIN_MIN} min)")
+        return "espera"
+    # Saved before searching, like brave_due: a failed search still counts as an access
+    cursor.execute("INSERT INTO linkedin_session (cookie_hash, searched_at) VALUES (?, ?) "
+                   "ON CONFLICT(cookie_hash) DO UPDATE SET searched_at = excluded.searched_at",
+                   (chave, agora_iso))
+    conn.commit()
+    return "ok"
+
+def marcar_login_expirado(conn, cursor, cookie, erros, agora=None):
+    agora = (agora or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    cursor.execute("UPDATE linkedin_session SET expired_at = ?, reminded_at = ? WHERE cookie_hash = ?",
+                   (agora, agora, _hash_cookie(cookie)))
+    conn.commit()
+    erros.append(AVISO_COOKIE_LINKEDIN)
+
+def marcar_login_valido(conn, cursor, cookie):
+    """LinkedIn aceitou o cookie: tira a pausa, se havia (o mesmo cookie voltou a valer)."""
+    cursor.execute("UPDATE linkedin_session SET expired_at = NULL, reminded_at = NULL WHERE cookie_hash = ?",
+                   (_hash_cookie(cookie),))
+    conn.commit()
+
+def _posts_com_login(conn, cursor, erros):
+    """Busca logada. False quando ela não pôde rodar (cookie caído, sem Playwright): vale a reserva."""
+    if not BS4_DISPONIVEL:
+        return False
+    for filtro in FILTROS_POSTS_LINKEDIN_LOGIN:
+        print(f"\n   🔎 {filtro['nome']} (logado)...")
+        try:
+            # No USER_AGENT here: linkedin_login builds one that matches the browser it launches
+            posts = linkedin_login.search_posts(LINKEDIN_LI_AT, filtro["termo"], ROLAGENS_POSTS_LINKEDIN,
+                                                period=PERIODO_POSTS_LINKEDIN_LOGIN)
+        except linkedin_login.LoginExpired:
+            print("   🔒 O LinkedIn pediu login de novo: cookie expirado")
+            marcar_login_expirado(conn, cursor, LINKEDIN_LI_AT, erros)
+            return False
+        except ImportError:
+            print("   ⚠️  Busca logada desativada: instale o playwright (pip install playwright)")
+            return False
+        except linkedin_login.SearchBlocked as e:
+            print(f"   🛑 HTTP {e.status}")
+            erros.append(f"{filtro['nome']}: o LinkedIn bloqueou a busca de publicações (código {e.status}).")
+            continue
+        except linkedin_login.ResultsNotFound:
+            print("   🛑 Nem publicações nem \"nenhum resultado\" na página")
+            erros.append(f"{filtro['nome']}: a página de publicações do LinkedIn não carregou ou mudou de formato.")
+            continue
+        except Exception as e:
+            print(f"   ⚠️  Erro: {e}")
+            erros.append(descrever_falha(filtro['nome'], e))
+            continue
+        # Only a search that went through proves the cookie is valid again
+        marcar_login_valido(conn, cursor, LINKEDIN_LI_AT)
+        print(f"   📄 {len(posts)} publicações na página")
+        _enviar_posts_linkedin(conn, cursor, filtro, posts)
+    return True
+
+def _posts_pela_brave(conn, cursor, erros):
     for filtro in FILTROS_POSTS_LINKEDIN:
         print(f"\n   🔎 {filtro['nome']}...")
         falhas_brave = []
@@ -608,32 +738,34 @@ def _varrer_posts_linkedin(conn, cursor, erros):
             continue
         # 429 = cota mensal da Brave esgotada ou buscas demais
         erros += [f"{filtro['nome']}: a Brave recusou a busca ({falha})." for falha in falhas_brave]
+        _enviar_posts_linkedin(conn, cursor, filtro, posts)
 
-        for post in posts:
-            texto, autor, link = post["text"], post["author"], post["link"]
+def _enviar_posts_linkedin(conn, cursor, filtro, posts):
+    for post in posts:
+        texto, autor, link = post["text"], post["author"], post["link"]
 
-            if not post_relevante(texto):
-                print(f"   🚫 Sem flutter + vaga(s) + remoto/remota: {texto[:55]}")
-                continue
+        if not post_relevante(texto):
+            print(f"   🚫 Sem flutter + vaga(s) + remoto/remota: {texto[:55]}")
+            continue
 
-            bloqueada, motivo = filtros_basicos(texto, autor)
-            if bloqueada:
-                print(f"   {motivo}")
-                continue
+        bloqueada, motivo = filtros_basicos(texto, autor)
+        if bloqueada:
+            print(f"   {motivo}")
+            continue
 
-            if ja_enviada(cursor, link):
-                continue
+        if ja_enviada(cursor, link):
+            continue
 
-            resumo = texto if len(texto) <= 300 else texto[:300].rsplit(" ", 1)[0] + "…"
+        resumo = texto if len(texto) <= 300 else texto[:300].rsplit(" ", 1)[0] + "…"
 
-            mensagem = (
-                f"📝 <b>LINKEDIN PUBLICAÇÃO — {filtro['nome']}</b>\n\n"
-                f"👤 <b>Autor:</b> {escapar(autor)}\n"
-                f"📅 <b>Data:</b> {escapar(post['date'])}\n\n"
-                f"💬 {escapar(resumo)}\n\n"
-                f"🔗 <a href='{escapar(link)}'>Ver publicação</a>"
-            )
-            registrar_e_enviar(conn, cursor, link, texto, autor, post["date"], mensagem, "LINKEDIN_POST")
+        mensagem = (
+            f"📝 <b>LINKEDIN PUBLICAÇÃO — {filtro['nome']}</b>\n\n"
+            f"👤 <b>Autor:</b> {escapar(autor)}\n"
+            f"📅 <b>Data:</b> {escapar(post['date'])}\n\n"
+            f"💬 {escapar(resumo)}\n\n"
+            f"🔗 <a href='{escapar(link)}'>Ver publicação</a>"
+        )
+        registrar_e_enviar(conn, cursor, link, texto, autor, post["date"], mensagem, "LINKEDIN_POST")
 
 # --- 7. INHIRE ---
 

@@ -87,7 +87,10 @@ Abra o `.env` e preencha os valores:
 TELEGRAM_TOKEN=seu_token_aqui
 CHAT_ID_GRUPO=seu_chat_id_aqui
 BRAVE_API_KEY=sua_chave_brave   # opcional: publicações do LinkedIn e busca na web
+LINKEDIN_LI_AT=seu_cookie_li_at # opcional: publicações do LinkedIn com login
 ```
+
+> **Como obter o `LINKEDIN_LI_AT` (opcional):** entre no LinkedIn pelo navegador, abra o DevTools (F12) → **Application** → **Cookies** → `https://www.linkedin.com` e copie o valor do cookie `li_at`. Ele dá acesso à sua conta: guarde só no `.env` e nos secrets, nunca no código. Para rodar localmente, instale também o navegador do Playwright: `python -m playwright install chromium`.
 
 > **Como obter a `BRAVE_API_KEY` (opcional):** crie uma conta em [Brave Search API](https://brave.com/search/api/) e gere uma chave no plano grátis (US$ 5 de crédito por mês, cerca de 1.000 consultas; ative o "Monthly Usage Limit" em US$ 5 para nunca ser cobrado). Sem ela, o bot só pula a busca de publicações do LinkedIn e a busca na web.
 
@@ -199,7 +202,14 @@ FILTROS_LINKEDIN = [
 
 #### `FILTROS_POSTS_LINKEDIN`
 
-Busca **publicações** (posts) do LinkedIn das últimas 24h, como "estamos contratando dev Flutter". A busca interna de publicações do LinkedIn exige login, então o bot pesquisa `site:linkedin.com/posts` na [Brave Search API](https://brave.com/search/api/). Requer `BRAVE_API_KEY`. O código fica em `linkedin_posts.py`.
+Busca **publicações** (posts) do LinkedIn das últimas 24h, como "estamos contratando dev Flutter". Há dois modos:
+
+- **Com login (`LINKEDIN_LI_AT`)**: o bot abre a busca de publicações do próprio LinkedIn num navegador sem janela (Playwright), filtrada pelas últimas 24h e ordenada pelas mais recentes. Acha bem mais publicações e traz o texto inteiro. O código fica em `linkedin_login.py`.
+- **Sem login (reserva)**: pesquisa `site:linkedin.com/posts` na [Brave Search API](https://brave.com/search/api/). Requer `BRAVE_API_KEY`. Só é usado sem cookie ou com o cookie expirado. A Brave indexa poucas publicações recentes, então costuma achar pouco. O código fica em `linkedin_posts.py`.
+
+**Cookie expirado:** quando o LinkedIn pede login de novo, o bot manda no aviso *"O login do LinkedIn expirou. Atualize o cookie (secret LINKEDIN_LI_AT)."* e para de abrir o LinkedIn até o secret mudar, para não insistir numa sessão barrada. A cada `INTERVALO_LEMBRETE_COOKIE_HORAS` (24h) ele tenta uma vez: se o mesmo cookie voltou a valer (ex.: você resolveu uma verificação de segurança no navegador), a busca volta sozinha; se não, o aviso se repete. Ao trocar o secret, a busca logada volta na execução seguinte. O estado fica na tabela `linkedin_session` do banco, que guarda só uma impressão digital (hash) do cookie, nunca o valor.
+
+> **Risco:** automação com conta pessoal vai contra os termos do LinkedIn, e os servidores do GitHub usam IP de datacenter. Por isso a busca logada roda no máximo uma vez por hora (`INTERVALO_POSTS_LINKEDIN_LOGIN_MIN`). Mesmo assim, o LinkedIn pode pedir verificação ou restringir a conta.
 
 ```python
 FILTROS_POSTS_LINKEDIN = [
@@ -218,7 +228,12 @@ TERMOS_OBRIGATORIOS_POSTS = [
 |---|---|
 | `termo` | Termo pesquisado nas publicações |
 | `PAGINAS_POSTS_LINKEDIN` | Páginas por termo (cada filtro × página = 1 consulta, até 20 posts) |
-| `INTERVALO_POSTS_LINKEDIN_MIN` | Minutos mínimos entre buscas de publicações (padrão 60), para caber na cota da Brave |
+| `INTERVALO_POSTS_LINKEDIN_MIN` | Minutos mínimos entre buscas de publicações na Brave (padrão 60), para caber na cota |
+| `FILTROS_POSTS_LINKEDIN_LOGIN` | Com login: termos da busca de publicações do LinkedIn (padrão `"flutter vaga"`). O texto inteiro ainda passa por `TERMOS_OBRIGATORIOS_POSTS` |
+| `PERIODO_POSTS_LINKEDIN_LOGIN` | Com login: `"past-24h"` (padrão), `"past-week"` ou `"past-month"`. A data da mensagem é o dia em que o bot achou a publicação |
+| `ROLAGENS_POSTS_LINKEDIN` | Com login: rolagens na página de resultados; cada uma carrega mais publicações (padrão 2) |
+| `INTERVALO_POSTS_LINKEDIN_LOGIN_MIN` | Com login: minutos mínimos entre buscas logadas (padrão 60) |
+| `INTERVALO_LEMBRETE_COOKIE_HORAS` | Com o cookie expirado: de quantas em quantas horas o bot tenta de novo e, se falhar, repete o aviso (padrão 24) |
 | `TERMOS_OBRIGATORIOS_POSTS` | Grupos de palavras: o texto precisa ter ao menos uma palavra de **cada** grupo |
 
 Com a configuração padrão, a publicação só é enviada se tiver "flutter" **e** ("vaga" **ou** "vagas") **e** ("remoto" **ou** "remota"), como palavras inteiras. O autor é comparado com `EMPRESAS_IGNORADAS`.
@@ -354,6 +369,7 @@ Vá em **Settings → Secrets and variables → Actions → New repository secre
 | `TELEGRAM_TOKEN` | Token gerado pelo [@BotFather](https://t.me/botfather) |
 | `CHAT_ID_GRUPO` | ID do seu grupo ou canal do Telegram |
 | `BRAVE_API_KEY` | (Opcional) Chave da Brave Search API, para as publicações do LinkedIn e a busca na web |
+| `LINKEDIN_LI_AT` | (Opcional) Cookie `li_at` do LinkedIn, para buscar publicações com login. O navegador do Playwright só é instalado no workflow quando este secret existe |
 
 ### 2. Ative o workflow
 
@@ -397,6 +413,8 @@ O que entra no aviso:
 
 - **Busca recusada ou sem resposta** em qualquer fonte (Gupy, ProgramaThor, LinkedIn, InHire, Solides, Remotar, web). Ex.: página da Solides que mudou de formato. Quando o LinkedIn pede uma pausa (excesso de buscas), o bot espera `PAUSA_NOVA_TENTATIVA_LINKEDIN` segundos e tenta de novo antes de avisar.
 - **Cota da Brave esgotada** nas publicações do LinkedIn e na busca na web.
+- **Login do LinkedIn expirado** (`LINKEDIN_LI_AT`): avisa na hora e de novo a cada 24h, se a nova tentativa também falhar.
+- **Página de publicações do LinkedIn bloqueada ou diferente do esperado** (busca com login): quando o LinkedIn recusa a página ou ela não mostra nem publicações nem "nenhum resultado". Assim uma mudança no site não passa por "dia sem publicações".
 - **Erro inesperado**: a fonte para e as outras continuam rodando.
 - **Vagas que o Telegram não entregou**: não ficam marcadas como enviadas e voltam na próxima execução. Quando o Telegram pede para esperar (limite de 20 mensagens por minuto num grupo), o bot espera e tenta de novo; entre uma vaga e outra ele já espera `PAUSA_ENTRE_VAGAS` segundos.
 - **beautifulsoup4 não instalado**: ProgramaThor e LinkedIn ficam desligados.
