@@ -162,8 +162,9 @@ def fake_response(body, url="https://www.linkedin.com/search/results/content/", 
 
 
 class FakePage:
-    def __init__(self, url, status, html, render_ok, content_error, responses, cards):
+    def __init__(self, url, status, html, render_ok, content_error, responses, cards, goto_error=None):
         self.url, self._status, self._html = url, status, html
+        self._goto_error = goto_error
         self._render_ok, self._content_error = render_ok, content_error
         self._responses, self._handlers = responses, []
         self.cards = mock.Mock()
@@ -176,6 +177,8 @@ class FakePage:
 
     def goto(self, url, **_kwargs):
         self.goto_url = url
+        if self._goto_error:
+            raise self._goto_error
         if self.url is None:
             self.url = url
         for response in self._responses:
@@ -201,11 +204,11 @@ class FakePage:
 
 
 def fake_playwright(url=None, status=200, html="", render_ok=True, cookies_after=None, content_error=False,
-                    responses=None, cards=1):
+                    responses=None, cards=1, goto_error=None):
     """sys.modules entries that stand in for playwright.sync_api."""
     cookies = [{"name": "li_at", "value": COOKIE}] if cookies_after is None else cookies_after
     responses = [fake_response(payload())] if responses is None else responses
-    page = FakePage(url, status, html, render_ok, content_error, responses, cards)
+    page = FakePage(url, status, html, render_ok, content_error, responses, cards, goto_error)
     context = mock.Mock()
     context.new_page.return_value = page
     context.cookies.return_value = cookies
@@ -295,6 +298,19 @@ class SearchPostsTest(unittest.TestCase):
     def test_navigation_error_with_valid_cookie_is_raised_as_is(self):
         with self.assertRaises(FakeError):
             self.search(content_error=True)
+
+    def test_redirect_loop_raises_login_expired(self):
+        # LinkedIn may bounce a rejected cookie between redirects, keeping li_at in place
+        error = FakeError("Page.goto: net::ERR_TOO_MANY_REDIRECTS at https://www.linkedin.com/search/")
+        with self.assertRaises(linkedin_login.LoginExpired):
+            # A failed first navigation leaves the page on about:blank
+            self.search(url="about:blank", goto_error=error)
+        self.browser.close.assert_called_once()
+
+    def test_other_goto_error_with_valid_cookie_is_raised_as_is(self):
+        with self.assertRaises(FakeError):
+            # A failed first navigation leaves the page on about:blank
+            self.search(url="about:blank", goto_error=FakeError("Page.goto: net::ERR_CONNECTION_RESET"))
 
     def test_user_agent_matches_the_launched_browser(self):
         self.search()

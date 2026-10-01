@@ -1,6 +1,6 @@
 # 🤖 Multi-Source Job Tracker: Automação de Vagas para Devs no Telegram
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Sources](https://img.shields.io/badge/Fontes-Gupy%20%7C%20LinkedIn%20%7C%20ProgramaThor%20%7C%20Solides%20%7C%20InHire%20%7C%20Remotar-orange)]()
 [![Telegram](https://img.shields.io/badge/Alertas-Telegram-2CA5E0)]()
 [![GitHub Actions](https://img.shields.io/badge/Automação-GitHub%20Actions-181717?logo=github)]()
@@ -56,7 +56,7 @@ Salva histórico no banco SQLite (evita reenvio de vagas já vistas)
 
 ## 📦 Pré-requisitos
 
-- Python 3.8+
+- Python 3.10+
 - Conta no GitHub (para rodar via GitHub Actions)
 - Um bot do Telegram criado via [@BotFather](https://t.me/botfather)
 - O ID do seu grupo ou canal do Telegram
@@ -207,7 +207,7 @@ Busca **publicações** (posts) do LinkedIn das últimas 24h, como "estamos cont
 - **Com login (`LINKEDIN_LI_AT`)**: o bot abre a busca de publicações do próprio LinkedIn num navegador sem janela (Playwright), filtrada pelas últimas 24h e ordenada pelas mais recentes. Acha bem mais publicações e traz o texto inteiro. O código fica em `linkedin_login.py`.
 - **Sem login (reserva)**: pesquisa `site:linkedin.com/posts` na [Brave Search API](https://brave.com/search/api/). Requer `BRAVE_API_KEY`. Só é usado sem cookie ou com o cookie expirado. A Brave indexa poucas publicações recentes, então costuma achar pouco. O código fica em `linkedin_posts.py`.
 
-**Cookie expirado:** quando o LinkedIn pede login de novo, o bot manda no aviso *"O login do LinkedIn expirou. Atualize o cookie (secret LINKEDIN_LI_AT)."* e para de abrir o LinkedIn até o secret mudar, para não insistir numa sessão barrada. A cada `INTERVALO_LEMBRETE_COOKIE_HORAS` (24h) ele tenta uma vez: se o mesmo cookie voltou a valer (ex.: você resolveu uma verificação de segurança no navegador), a busca volta sozinha; se não, o aviso se repete. Ao trocar o secret, a busca logada volta na execução seguinte. O estado fica na tabela `linkedin_session` do banco, que guarda só uma impressão digital (hash) do cookie, nunca o valor.
+**Cookie expirado:** quando o LinkedIn pede login de novo (ou fica redirecionando a página em círculo, o `ERR_TOO_MANY_REDIRECTS`), o bot manda no aviso *"O login do LinkedIn expirou. Atualize o cookie (secret LINKEDIN_LI_AT)."* e para de abrir o LinkedIn até o secret mudar, para não insistir numa sessão barrada. A cada `INTERVALO_LEMBRETE_COOKIE_HORAS` (24h) ele tenta uma vez: se o mesmo cookie voltou a valer (ex.: você resolveu uma verificação de segurança no navegador), a busca volta sozinha; se não, o aviso se repete. Ao trocar o secret, a busca logada volta na execução seguinte. O estado fica na tabela `linkedin_session` do banco, que guarda só uma impressão digital (hash) do cookie, nunca o valor.
 
 > **Risco:** automação com conta pessoal vai contra os termos do LinkedIn, e os servidores do GitHub usam IP de datacenter. Por isso a busca logada roda no máximo uma vez por hora (`INTERVALO_POSTS_LINKEDIN_LOGIN_MIN`). Mesmo assim, o LinkedIn pode pedir verificação ou restringir a conta.
 

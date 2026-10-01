@@ -700,8 +700,8 @@ def _posts_com_login(conn, cursor, erros):
             # No USER_AGENT here: linkedin_login builds one that matches the browser it launches
             posts = linkedin_login.search_posts(LINKEDIN_LI_AT, filtro["termo"], ROLAGENS_POSTS_LINKEDIN,
                                                 period=PERIODO_POSTS_LINKEDIN_LOGIN)
-        except linkedin_login.LoginExpired:
-            print("   🔒 O LinkedIn pediu login de novo: cookie expirado")
+        except linkedin_login.LoginExpired as e:
+            print(f"   🔒 O LinkedIn pediu login de novo ({e}): cookie expirado")
             marcar_login_expirado(conn, cursor, LINKEDIN_LI_AT, erros)
             return False
         except ImportError:

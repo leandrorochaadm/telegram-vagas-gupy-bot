@@ -4,11 +4,11 @@ Opens LinkedIn's own content search, filtered by post date and sorted by date,
 so it finds posts that search engines never index. The li_at cookie comes from a
 browser where the account is logged in (DevTools → Application → Cookies).
 
-When the cookie is no longer valid, LinkedIn redirects to a login page (or drops
-the cookie) and search_posts raises LoginExpired. A refused page raises
-SearchBlocked, and a page with neither posts nor the "no results" message (or
-with posts but no post links) raises ResultsNotFound, so a layout change never
-passes as "no posts today".
+When the cookie is no longer valid, LinkedIn redirects to a login page, drops
+the cookie or loops through redirects, and search_posts raises LoginExpired.
+A refused page raises SearchBlocked, and a page with neither posts nor the
+"no results" message (or with posts but no post links) raises ResultsNotFound,
+so a layout change never passes as "no posts today".
 """
 import re
 import sys
@@ -19,6 +19,9 @@ from urllib.parse import quote, urlencode, urlparse
 SEARCH_URL = "https://www.linkedin.com/search/results/content/"
 # Where LinkedIn sends a session it no longer accepts
 LOGIN_PATHS = ("/login", "/uas/login", "/checkpoint", "/authwall", "/signup")
+# A rejected li_at can also make LinkedIn bounce the page between redirects
+# until Chromium gives up, instead of landing on a login page
+REDIRECT_LOOP_ERROR = "ERR_TOO_MANY_REDIRECTS"
 PAGE_TIMEOUT_MS = 45_000
 RESULTS_TIMEOUT_MS = 20_000  # search results load after the page itself
 SCROLL_WAIT_MS = 2_500       # each scroll loads the next batch of posts
@@ -208,7 +211,9 @@ def search_posts(li_at: str, query: str, scrolls: int = 2, user_agent: str | Non
             try:
                 return _read_results(page, context, build_search_url(query, period), scrolls,
                                      PlaywrightTimeout, payloads)
-            except PlaywrightError:
+            except PlaywrightError as error:
+                if REDIRECT_LOOP_ERROR in str(error):
+                    raise LoginExpired(REDIRECT_LOOP_ERROR) from None
                 # A redirect to the login page while the page loads surfaces as a
                 # navigation error ("execution context was destroyed"), not a timeout
                 _check_session(page, context)
