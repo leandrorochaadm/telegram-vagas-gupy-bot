@@ -19,12 +19,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # One job per site, in parallel: a site that hangs or fails does not stop the others
   buscar-vagas:
     runs-on: ubuntu-latest
+    # Safety net only: the search itself is cut 14 min after the job starts (see "Executar bot")
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [gupy, programathor, linkedin, linkedin_posts, inhire, solides, remotar, web]
     env:
       HAS_LINKEDIN_LI_AT: ${{ secrets.LINKEDIN_LI_AT != '' }}
 
     steps:
+      # The 15 min window counts from here, setup included
+      - name: Marcar início
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Checkout repositório
         uses: actions/checkout@v5
 
@@ -40,7 +51,7 @@ jobs:
       # Only when the secret exists; the step gets a true/false flag, never the cookie.
       # If it fails the bot still runs: posts fall back to the Brave search.
       - name: Instalar navegador do Playwright
-        if: env.HAS_LINKEDIN_LI_AT == 'true'
+        if: matrix.source == 'linkedin_posts' && env.HAS_LINKEDIN_LI_AT == 'true'
         continue-on-error: true
         timeout-minutes: 5
         run: python -m playwright install --with-deps chromium
@@ -48,12 +59,14 @@ jobs:
       # Reuse one WARP account across runs instead of registering a new one every 30 min
       # (Cloudflare rate-limits registrations). Bump the key to force a fresh account.
       - name: Restaurar conta WARP
+        if: matrix.source == 'programathor'
         uses: actions/cache@v4
         with:
           path: ~/.wgcf
           key: wgcf-account-v1
 
       - name: Conectar Cloudflare WARP
+        if: matrix.source == 'programathor'
         # ProgramaThor's Cloudflare blocks GitHub's datacenter IPs (403). wgcf registers a free
         # WARP account and wireproxy exposes it as a local SOCKS proxy (userspace, no apt:
         # installing the official cloudflare-warp package hangs on the runners).
@@ -102,14 +115,94 @@ jobs:
           echo "SCRAPER_PROXY=socks5h://127.0.0.1:40000" >> "$GITHUB_ENV"
 
       - name: Executar bot
+        id: run
+        timeout-minutes: 15
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
           LINKEDIN_LI_AT: ${{ secrets.LINKEDIN_LI_AT }}
-        run: python main.py
+        # Search until 14 min after the job start (1 min left to save the copy), so the
+        # sending job starts ~15 min after the run. Jobs are queued in the database as they
+        # are found: a search cut short still has the ones it found sent.
+        run: |
+          remaining=$(( JOB_START + 14 * 60 - $(date +%s) ))
+          [ "$remaining" -gt 0 ] || { echo "No time left after setup"; exit 1; }
+          timeout "$remaining" python main.py --source ${{ matrix.source }}
+
+      # Hung (timeout) or crashed: the final alert says this site stopped early
+      - name: Anotar busca interrompida
+        if: always() && steps.run.outcome != 'success' && steps.run.outcome != 'skipped'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
+        run: python main.py --failed ${{ matrix.source }}
+
+      # Copy of the database with the jobs this site found (queued, not sent yet); the next job merges all copies.
+      # The journal goes too: a search killed mid-write leaves its rollback there.
+      # Not when the search never started (setup failed): the merge then alerts that this site did not run
+      - name: Guardar cópia do banco
+        if: always() && steps.run.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-${{ matrix.source }}
+          path: vagas_gupy.db*
+          retention-days: 1
+          if-no-files-found: ignore
+
+  # Runs last: merges the copies into vagas_gupy.db, sends every queued job (the same
+  # job from two sites goes out once), sends one alert and makes a single commit
+  finalizar:
+    needs: buscar-vagas
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v5
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      # No copy at all (every job failed early) must not stop the merge: it alerts each missing site
+      - name: Baixar cópias do banco
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: db-*
+          path: copias
+
+      - name: Juntar cópias do banco
+        id: merge
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
+        run: python main.py --merge copias
+
+      # A job that does not reach the group stays queued for the next run
+      - name: Enviar vagas
+        if: always() && steps.merge.outcome == 'success'
+        timeout-minutes: 15
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
+        run: python main.py --send-jobs
+
+      - name: Enviar avisos
+        if: always() && steps.merge.outcome == 'success'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
+        run: python main.py --send-alerts
 
       - name: Salvar banco de dados atualizado
+        if: always() && steps.merge.outcome == 'success'
         continue-on-error: true
         run: |
           git config --local user.email "action@github.com"

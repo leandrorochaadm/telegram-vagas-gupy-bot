@@ -378,14 +378,25 @@ Após o fork, vá em **Actions** no seu repositório e clique em **"I understand
 ### 3. Horários de execução
 
 O agendamento nativo do GitHub Actions atrasa ou pula execuções. Por isso, o horário principal fica num Cloudflare Worker (grátis), que dispara o workflow no minuto certo:
-- **Segunda a sexta:** a cada 30 min, das 8h às 20h30 (BRT)
-- **Sábado e domingo:** a cada 1h, das 10h às 18h (BRT)
+- **Segunda a sexta:** a cada 2h, das 8h às 20h (BRT)
+- **Sábado e domingo:** a cada 4h, às 10h, 14h e 18h (BRT)
 
 Como **reserva**, o próprio workflow roda às 9h23, 13h23 e 17h23 (BRT), todo dia. Se o Worker parar (por exemplo, com o token vencido), o bot continua rodando, só que menos vezes. Execuções extras não duplicam vagas, porque o banco guarda o que já foi enviado.
 
-O Worker fica no repositório [workana-telegram-bot](https://github.com/leandrorochaadm/workana-telegram-bot) (pasta `scheduler/`) e dispara os dois bots. Para alterar os horários principais, edite a regra `gupy` em `scheduler/src/index.js`, escrita em horário de Brasília. Para alterar a reserva, edite `.github/workflows/vagas.yml` (cron em UTC; BRT = UTC-3).
+O Worker fica na pasta `scheduler/` deste repositório. Para alterar os horários principais, edite os `crons` em `scheduler/wrangler.jsonc` e publique com `npx wrangler deploy` (dentro de `scheduler/`). Para alterar a reserva, edite `.github/workflows/vagas.yml`. Nos dois arquivos o cron é em UTC (BRT = UTC-3).
 
-Em um fork, sem o Worker, o bot roda só nos horários de reserva. Para ter o agendamento preciso, publique um Worker como o do workana-telegram-bot apontando para o seu repositório, com um token (fine-grained) com permissão **Actions: Read and write**.
+Em um fork, sem o Worker, o bot roda só nos horários de reserva. Para ter o agendamento preciso, troque o `REPO` em `scheduler/src/index.js` pelo seu repositório e publique o Worker com um token (fine-grained) com permissão **Actions: Read and write** (`npx wrangler secret put GITHUB_TOKEN`).
+
+### Como cada execução roda
+
+Cada site roda num job próprio, todos ao mesmo tempo. Se um site travar ou der erro, os outros seguem normalmente:
+
+1. **Um job por site** (Gupy, ProgramaThor, LinkedIn, publicações do LinkedIn, InHire, Sólides, Remotar e a busca na web), todos ao mesmo tempo. Cada job só **guarda** as vagas que acha numa fila do banco (tabela `vagas_pendentes`), sem enviar ao grupo. Cada um tem **15 min** contados do início (instalação incluída); quem passar disso é interrompido, mas as vagas que já guardou são enviadas.
+2. **Envio, por último:** junta as cópias no `vagas_gupy.db`, **envia todas as vagas da fila** de uma vez, envia **um aviso só** com os problemas de todos e faz um único commit.
+
+Como o envio acontece num lugar só, a mesma vaga achada em dois sites chega uma vez só ao grupo (vale a mensagem do site dedicado, que vem antes da web). Vaga que o Telegram recusar fica na fila e é enviada na próxima execução.
+
+Para rodar localmente, `python main.py` continua buscando em todos os sites, um depois do outro. Para um site só: `python main.py --source gupy` (opções em `python main.py --help`).
 
 ---
 

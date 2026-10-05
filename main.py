@@ -1,5 +1,7 @@
+import argparse
 import os
 import re
+import sys
 import hashlib
 import html
 import json
@@ -354,7 +356,45 @@ def escapar(valor):
 # Vagas que o Telegram não entregou nesta execução (avisadas no fim, em main)
 _falhas_envio = []
 
+# Parallel jobs (--source) only queue the jobs they find; the --send-jobs step
+# sends them all at the end, so the same job found by two sites goes out once
+_queue_jobs = False
+
+def queue_job(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte):
+    """Save the job in the database for the --send-jobs step to send."""
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS vagas_pendentes (link TEXT PRIMARY KEY, titulo TEXT, "
+        "empresa TEXT, data_publicacao TEXT, mensagem TEXT, fonte TEXT)"
+    )
+    cursor.execute("INSERT OR IGNORE INTO vagas_pendentes VALUES (?, ?, ?, ?, ?, ?)",
+                   (link, titulo, empresa, data_f, mensagem, fonte))
+    conn.commit()
+    print(f"   📥 Na fila: {titulo[:50]}")
+
+def send_queued_jobs(conn, cursor):
+    """Send the queued jobs in the order they were found (dedicated sites before web).
+
+    A job that does not reach the group stays queued for the next run.
+    """
+    if not cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vagas_pendentes'"
+    ).fetchone():
+        return
+    queued = cursor.execute(
+        "SELECT link, titulo, empresa, data_publicacao, mensagem, fonte FROM vagas_pendentes ORDER BY rowid"
+    ).fetchall()
+    for link, titulo, empresa, data_f, mensagem, fonte in queued:
+        if not ja_enviada(cursor, link):
+            # Also skips the same job already sent from another site in this step
+            registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte)
+        if ja_enviada(cursor, link):
+            cursor.execute("DELETE FROM vagas_pendentes WHERE link = ?", (link,))
+            conn.commit()
+
 def registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte):
+    if _queue_jobs:
+        queue_job(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte)
+        return
     chave = _chave_sessao(titulo, empresa)
     if chave in _enviados_sessao:
         print(f"   🔁 Duplicata (sessão): {titulo[:50]}")
@@ -431,6 +471,14 @@ def montar_aviso(avisos):
         mensagem += bloco
     return mensagem
 
+def store_alerts(conn, cursor):
+    """Save this run's problems in the database, for the next alert to send."""
+    cursor.execute("CREATE TABLE IF NOT EXISTS avisos_pendentes (fonte TEXT, texto TEXT)")
+    cursor.executemany("INSERT INTO avisos_pendentes VALUES (?, ?)", _avisos)
+    conn.commit()
+    # Only once saved: if the database fails, main still sends these directly
+    _avisos.clear()
+
 def enviar_avisos(conn, cursor, agora=None):
     """Manda os problemas guardados numa mensagem só, no máximo uma a cada INTERVALO_AVISOS_MIN.
 
@@ -439,12 +487,8 @@ def enviar_avisos(conn, cursor, agora=None):
     # UTC: o banco vai para o repositório e roda tanto no GitHub (UTC) quanto
     # localmente (horário de Brasília); hora local faria o intervalo errar em 3h
     agora = agora or datetime.now(timezone.utc)
-    cursor.execute("CREATE TABLE IF NOT EXISTS avisos_pendentes (fonte TEXT, texto TEXT)")
+    store_alerts(conn, cursor)
     cursor.execute("CREATE TABLE IF NOT EXISTS avisos_enviados (enviado_em TEXT)")
-    cursor.executemany("INSERT INTO avisos_pendentes VALUES (?, ?)", _avisos)
-    conn.commit()
-    # Só depois de gravados: se o banco falhar, main ainda manda estes direto
-    _avisos.clear()
 
     pendentes = cursor.execute("SELECT fonte, texto FROM avisos_pendentes ORDER BY rowid").fetchall()
     if not pendentes:
@@ -1073,7 +1117,115 @@ def anotar_falhas_envio():
         "Elas serão enviadas de novo na próxima execução."
     ])
 
-def main():
+# Sources the workflow runs as parallel jobs (python main.py --source <name>):
+# name -> (function name, label used in the alert). Function names, not the
+# functions, so tests can patch them. Order = sequential order of a full run.
+SOURCES = {
+    "gupy": ("buscar_vagas_gupy", "GUPY"),
+    "programathor": ("buscar_vagas_programathor", "PROGRAMATHOR"),
+    "linkedin": ("buscar_vagas_linkedin", "LINKEDIN"),
+    "linkedin_posts": ("buscar_posts_linkedin", "LINKEDIN PUBLICAÇÕES"),
+    "inhire": ("buscar_vagas_inhire", "INHIRE"),
+    "solides": ("buscar_vagas_solides", "SOLIDES"),
+    "remotar": ("buscar_vagas_remotar", "REMOTAR"),
+    # Last: dedicated sources send richer messages for the same links. Its copy is
+    # merged last too, so a link a dedicated source also queued keeps that message.
+    "web": ("buscar_vagas_web", "WEB"),
+}
+# Sources that skip the scan without beautifulsoup4
+BS4_SOURCES = {"programathor", "linkedin"}
+
+# Tables only one source writes: its copy replaces them whole on merge,
+# so rows the source deleted (e.g. InHire tenants) are not brought back
+OWNED_TABLES = {
+    "inhire_tenants": "inhire",
+    "inhire_discovery": "inhire",
+    "linkedin_session": "linkedin_posts",
+}
+# Only the alert step writes it
+SKIPPED_TABLES = {"avisos_enviados"}
+
+AVISO_FONTE_INTERROMPIDA = "A busca parou antes do fim (travou ou deu erro). Os outros sites não foram afetados."
+AVISO_FONTE_SEM_BANCO = "A busca não rodou desta vez. Os outros sites não foram afetados."
+AVISO_COPIA_ESTRAGADA = ("Não foi possível juntar o que este site salvou. "
+                         "As vagas dele podem chegar repetidas na próxima execução.")
+
+def merge_databases(conn, cursor, copies):
+    """Bring into the main database what each parallel job saved in its copy.
+
+    `copies` maps source name -> path of its copy. Every copy started from
+    this same database, so rows it already has are skipped.
+    """
+    cursor.execute("CREATE TABLE IF NOT EXISTS avisos_pendentes (fonte TEXT, texto TEXT)")
+    # Alerts already pending before the jobs ran are in every copy too: take only the new ones
+    pending_before = cursor.execute("SELECT COALESCE(MAX(rowid), 0) FROM avisos_pendentes").fetchone()[0]
+    for source, path in copies.items():
+        attached = False
+        try:
+            cursor.execute("ATTACH DATABASE ? AS copy", (path,))
+            attached = True
+            _merge_copy(cursor, source, pending_before)
+            conn.commit()
+        except sqlite3.DatabaseError as e:
+            # A broken copy (e.g. job killed mid-write) loses only this source's records
+            conn.rollback()
+            print(f"❌ Cópia do banco de {source} não foi juntada: {e}")
+            anotar_avisos(SOURCES[source][1], [AVISO_COPIA_ESTRAGADA])
+        finally:
+            if attached:
+                cursor.execute("DETACH DATABASE copy")
+
+def _merge_copy(cursor, source, pending_before):
+    """Merge the attached `copy` database of job `source` into main."""
+    tables = cursor.execute(
+        "SELECT name, sql FROM copy.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    for table, create_sql in tables:
+        if table in SKIPPED_TABLES or (table in OWNED_TABLES and OWNED_TABLES[table] != source):
+            continue
+        cursor.execute(create_sql.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
+        cols = ", ".join(f'"{row[1]}"' for row in cursor.execute(f'PRAGMA copy.table_info("{table}")'))
+        select = f'SELECT {cols} FROM copy."{table}"'
+        if table in OWNED_TABLES:
+            cursor.execute(f'DELETE FROM main."{table}"')
+            cursor.execute(f'INSERT INTO main."{table}" ({cols}) {select}')
+        elif table == "avisos_pendentes":
+            cursor.execute(f'INSERT INTO main."{table}" ({cols}) {select} WHERE rowid > ?', (pending_before,))
+        elif table == "brave_searches":
+            # Every copy has the base times: keep only a newer one, or an older copy
+            # merged later would undo it and the Brave quota would be spent every run.
+            # "WHERE true" lets SQLite parse ON CONFLICT after a SELECT.
+            cursor.execute(f'INSERT INTO main.brave_searches ({cols}) {select} WHERE true '
+                           'ON CONFLICT(source) DO UPDATE SET searched_at = excluded.searched_at '
+                           'WHERE excluded.searched_at > brave_searches.searched_at')
+        else:
+            # vagas_enviadas and any keyed table added later
+            cursor.execute(f'INSERT OR IGNORE INTO main."{table}" ({cols}) {select}')
+
+def find_copies(folder):
+    """{source: database path} of the job copies downloaded to `folder` (one db-<source>/ each)."""
+    copies = {}
+    for source in SOURCES:
+        path = os.path.join(folder, f"db-{source}", os.path.basename(CAMINHO_BANCO))
+        if os.path.exists(path):
+            copies[source] = path
+    return copies
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description="Busca vagas e envia ao grupo do Telegram.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--source", choices=SOURCES, help="roda só esta fonte e guarda os avisos sem enviar")
+    mode.add_argument("--failed", choices=SOURCES, help="anota que a fonte parou antes do fim")
+    mode.add_argument("--merge", metavar="PASTA", help="junta as cópias do banco salvas pelos jobs")
+    mode.add_argument("--send-jobs", action="store_true", help="envia as vagas guardadas pelos jobs")
+    mode.add_argument("--send-alerts", action="store_true", help="envia os avisos guardados")
+    return parser.parse_args(argv)
+
+def main(argv=()):
+    global _queue_jobs
+    args = parse_args(argv)
+    # Set on every call: a single-source run only queues, the others send
+    _queue_jobs = bool(args.source)
     if not TOKEN or not CHAT_ID:
         print("❌ ERRO: Token do Telegram ou Chat ID não encontrados no arquivo .env!")
         return
@@ -1086,28 +1238,45 @@ def main():
         enviar_telegram(montar_aviso([("BOT", f"Não foi possível abrir o banco de vagas, nenhuma busca foi feita: {e}")]))
         return
 
-    if not BS4_DISPONIVEL:
+    # Parallel jobs only save their problems: the --send-alerts step sends one alert for all
+    parallel_step = bool(args.source or args.failed or args.merge or args.send_jobs)
+    # Full run (local) by default; the workflow runs each step in its own job
+    if args.source:
+        sources = [args.source]
+    elif parallel_step or args.send_alerts:
+        sources = []
+    else:
+        sources = list(SOURCES)
+    if not BS4_DISPONIVEL and BS4_SOURCES & set(sources):
         anotar_avisos("BOT", [AVISO_SEM_BS4])
-
-    buscar_vagas_gupy(conn, cursor)
-    buscar_vagas_programathor(conn, cursor)
-    buscar_vagas_linkedin(conn, cursor)
-    buscar_posts_linkedin(conn, cursor)
-    buscar_vagas_inhire(conn, cursor)
-    buscar_vagas_solides(conn, cursor)
-    buscar_vagas_remotar(conn, cursor)
-    # Last: dedicated sources send richer messages for the same links
-    buscar_vagas_web(conn, cursor)
+    for source in sources:
+        globals()[SOURCES[source][0]](conn, cursor)
+    # Full run: also sends what a workflow run left queued (e.g. Telegram refused it)
+    if args.send_jobs or not (parallel_step or args.send_alerts):
+        send_queued_jobs(conn, cursor)
     anotar_falhas_envio()
+
+    if args.failed:
+        anotar_avisos(SOURCES[args.failed][1], [AVISO_FONTE_INTERROMPIDA])
+    if args.merge:
+        copies = find_copies(args.merge)
+        for source, (_, label) in SOURCES.items():
+            if source not in copies:
+                anotar_avisos(label, [AVISO_FONTE_SEM_BANCO])
+        merge_databases(conn, cursor, copies)
+
     try:
-        enviar_avisos(conn, cursor)
+        if parallel_step:
+            store_alerts(conn, cursor)
+        else:
+            enviar_avisos(conn, cursor)
     except Exception as e:
         # Banco falhou ao guardar os avisos: manda os desta execução direto
         print(f"❌ Erro ao guardar os avisos: {e}")
         enviar_telegram(montar_aviso(_avisos + [("BOT", f"Não foi possível guardar os avisos no banco: {e}")]))
 
     conn.close()
-    print("\n✅ Varredura completa de todas as fontes!")
+    print("\n✅ Varredura completa!" if sources else "\n✅ Pronto!")
 
 if __name__ == '__main__':
-    main()
+    main(sys.argv[1:])
