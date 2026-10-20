@@ -174,5 +174,74 @@ class WorkflowLayoutTest(unittest.TestCase):
         self.assertNotIn("continue-on-error", retry_step)
 
 
+class DependencyCacheTest(unittest.TestCase):
+    PLAYWRIGHT_IF = "if: matrix.source == 'linkedin_posts' && env.HAS_LINKEDIN_LI_AT == 'true'"
+    RESTORE = "Restaurar navegador do Playwright"
+    INSTALL = "Instalar navegador do Playwright"
+    SAVE = "Guardar navegador do Playwright"
+
+    def lines_with(self, block: str, prefix: str) -> list[str]:
+        return [line.strip() for line in block.splitlines() if line.strip().startswith(prefix)]
+
+    def test_every_setup_python_caches_pip(self):
+        self.assertEqual(TEXT.count("uses: actions/setup-python@v6"), 2)
+        for job in ("buscar-vagas", "finalizar"):
+            step = step_block(job, "Configurar Python")
+            self.assertIn("cache: 'pip'", step)
+            self.assertIn("cache-dependency-path: requirements.txt", step)
+
+    def test_playwright_browser_is_cached_by_requirements_hash(self):
+        step = step_block("buscar-vagas", self.RESTORE)
+        for text in ("id: playwright-cache", "uses: actions/cache/restore@v4", "continue-on-error: true",
+                     "path: ~/.cache/ms-playwright", "hashFiles('requirements.txt')", self.PLAYWRIGHT_IF):
+            self.assertIn(text, step)
+        self.assertIn(self.PLAYWRIGHT_IF, step_block("buscar-vagas", self.INSTALL))
+        names = step_names("buscar-vagas")
+        self.assertEqual(names.index(self.RESTORE) + 1, names.index(self.INSTALL))
+
+    def run_install(self, cache_hit: str) -> tuple[subprocess.CompletedProcess, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            path = os.path.join(bin_dir, "python")
+            with open(path, "w") as f:
+                f.write(FAKE_PYTHON)
+            os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+            env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", FAKE_STATE=tmp,
+                       PLAYWRIGHT_CACHE_HIT=cache_hit)
+            result = subprocess.run(["bash", "-e", "-c", run_script(self.INSTALL)],
+                                    env=env, capture_output=True, text=True)
+            with open(os.path.join(tmp, "python")) as f:
+                return result, f.read().strip()
+
+    def test_playwright_install_skips_download_on_cache_hit(self):
+        step = step_block("buscar-vagas", self.INSTALL)
+        for text in ("id: playwright-install", "continue-on-error: true", "timeout-minutes: 5",
+                     "PLAYWRIGHT_CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}"):
+            self.assertIn(text, step)
+        for cache_hit, expected in (("true", "-m playwright install-deps chromium"),
+                                    ("false", "-m playwright install --with-deps chromium"),
+                                    ("", "-m playwright install --with-deps chromium")):
+            result, called = self.run_install(cache_hit)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(called, expected)
+
+    def test_playwright_cache_is_saved_only_after_successful_install(self):
+        names = step_names("buscar-vagas")
+        self.assertEqual(names.index(self.INSTALL) + 1, names.index(self.SAVE))
+        step = step_block("buscar-vagas", self.SAVE)
+        for text in ("uses: actions/cache/save@v4", "continue-on-error: true",
+                     "steps.playwright-install.outcome == 'success'",
+                     "steps.playwright-cache.outputs.cache-hit != 'true'", "matrix.source == 'linkedin_posts'"):
+            self.assertIn(text, step)
+        restore = step_block("buscar-vagas", self.RESTORE)
+        for prefix in ("path:", "key:"):
+            self.assertEqual(self.lines_with(step, prefix), self.lines_with(restore, prefix))
+        for name in step_names("buscar-vagas"):
+            block = step_block("buscar-vagas", name)
+            if "uses: actions/cache@v4" in block:
+                self.assertNotIn("ms-playwright", block)
+
+
 if __name__ == "__main__":
     unittest.main()
