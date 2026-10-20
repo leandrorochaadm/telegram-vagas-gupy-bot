@@ -142,6 +142,8 @@ jobs:
       # The journal goes too: a search killed mid-write leaves its rollback there.
       # Not when the search never started (setup failed): the merge then alerts that this site did not run
       - name: Guardar cópia do banco
+        id: upload
+        continue-on-error: true
         if: always() && steps.run.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
@@ -149,6 +151,21 @@ jobs:
           path: vagas_gupy.db*
           retention-days: 1
           if-no-files-found: ignore
+
+      # A network error while finalizing the upload loses the whole copy: wait and send it once more
+      - name: Esperar antes de reenviar a cópia
+        if: always() && steps.run.outcome != 'skipped' && steps.upload.outcome == 'failure'
+        run: sleep 15
+
+      - name: Guardar cópia do banco (nova tentativa)
+        if: always() && steps.run.outcome != 'skipped' && steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-${{ matrix.source }}
+          path: vagas_gupy.db*
+          retention-days: 1
+          if-no-files-found: ignore
+          overwrite: true
 
   # Runs last: merges the copies into vagas_gupy.db, sends every queued job (the same
   # job from two sites goes out once), sends one alert and makes a single commit

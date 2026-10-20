@@ -41,6 +41,14 @@ def step_names(job: str) -> list[str]:
             if line.strip().startswith("- name: ")]
 
 
+def step_block(job: str, name: str) -> str:
+    """Text of the step `name` in `job`, up to the next step or the end of the job."""
+    lines = job_block(job).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == f"- name: {name}")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("- name:")), len(lines))
+    return "\n".join(lines[start:end])
+
+
 def run_script(step_name: str) -> str:
     start = next(i for i, line in enumerate(LINES) if line.strip() == f"- name: {step_name}")
     run_at = next(i for i in range(start, len(LINES)) if LINES[i].strip() == "run: |")
@@ -141,6 +149,29 @@ class WorkflowLayoutTest(unittest.TestCase):
         step = block[block.index("- name: Enviar vagas"):block.index("- name: Enviar avisos")]
         self.assertIn("if: always() && steps.merge.outcome == 'success'", step)
         self.assertIn("run: python main.py --send-jobs", step)
+
+    def test_db_copy_upload_is_retried_with_overwrite_when_first_fails(self):
+        first, wait, retry = ("Guardar cópia do banco", "Esperar antes de reenviar a cópia",
+                              "Guardar cópia do banco (nova tentativa)")
+        names = step_names("buscar-vagas")
+        self.assertEqual(names[names.index(first):names.index(first) + 3], [first, wait, retry])
+        base_if = "if: always() && steps.run.outcome != 'skipped'"
+        retry_if = f"{base_if} && steps.upload.outcome == 'failure'"
+
+        first_step = step_block("buscar-vagas", first)
+        for text in ("id: upload", "continue-on-error: true", base_if):
+            self.assertIn(text, first_step)
+
+        wait_step = step_block("buscar-vagas", wait)
+        self.assertIn("run: sleep 15", wait_step)
+        self.assertIn(retry_if, wait_step)
+
+        retry_step = step_block("buscar-vagas", retry)
+        for text in (retry_if, "uses: actions/upload-artifact@v4", "name: db-${{ matrix.source }}",
+                     "path: vagas_gupy.db*", "retention-days: 1", "if-no-files-found: ignore",
+                     "overwrite: true"):
+            self.assertIn(text, retry_step)
+        self.assertNotIn("continue-on-error", retry_step)
 
 
 if __name__ == "__main__":

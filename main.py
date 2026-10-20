@@ -1146,7 +1146,7 @@ OWNED_TABLES = {
 SKIPPED_TABLES = {"avisos_enviados"}
 
 AVISO_FONTE_INTERROMPIDA = "A busca parou antes do fim (travou ou deu erro). Os outros sites não foram afetados."
-AVISO_FONTE_SEM_BANCO = "A busca não rodou desta vez. Os outros sites não foram afetados."
+AVISO_FONTE_SEM_BANCO = "O resultado desta busca se perdeu antes do fim. Ela roda de novo na próxima vez. Os outros sites não foram afetados."
 AVISO_COPIA_ESTRAGADA = ("Não foi possível juntar o que este site salvou. "
                          "As vagas dele podem chegar repetidas na próxima execução.")
 
