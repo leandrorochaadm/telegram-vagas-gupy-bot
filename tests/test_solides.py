@@ -83,6 +83,11 @@ class FlightParsingTest(unittest.TestCase):
 
 class SolidesPageTest(unittest.TestCase):
 
+    def setUp(self):
+        patcher = mock.patch.object(main.time, "sleep")
+        self.sleep = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _response(self, status, text=""):
         return mock.Mock(status_code=status, text=text)
 
@@ -106,6 +111,86 @@ class SolidesPageTest(unittest.TestCase):
         with mock.patch.object(main.requests, "get", return_value=self._response(200, next_html('0:{"x":1}\n'))):
             with self.assertRaisesRegex(main.FalhaFonte, "mudou de formato"):
                 main._solides_pagina("remoto/flutter", 1, {})
+
+    BLOCK_PAGE = "<html><head><title> Just a moment... </title></head><body>MARCADOR-DO-CORPO</body></html>"
+
+    def _diagnostic_lines(self, text):
+        with mock.patch.object(main.requests, "get", return_value=self._response(200, text)):
+            with mock.patch("builtins.print") as printed:
+                with self.assertRaises(main.FalhaFonte):
+                    main._solides_pagina("remoto/flutter", 1, {})
+        return [" ".join(str(a) for a in c.args) for c in printed.call_args_list]
+
+    def test_page_retries_once_when_initial_data_is_missing(self):
+        flight = text_row("1e", "<p>Dart</p>") + initial_data_row([make_vaga(description="$1e")], total_pages=3)
+        responses = [self._response(200, self.BLOCK_PAGE), self._response(200, next_html(flight))]
+        with mock.patch.object(main.requests, "get", side_effect=responses) as get:
+            vagas, total, textos = main._solides_pagina("remoto/flutter", 2, {})
+
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(get.call_args_list[0].kwargs["params"], get.call_args_list[1].kwargs["params"])
+        self.sleep.assert_called_once_with(main.PAUSA_NOVA_TENTATIVA_SOLIDES)
+        self.assertEqual(total, 3)
+        self.assertEqual(vagas[0]["id"], 914710)
+        self.assertEqual(textos["1e"], "<p>Dart</p>")
+
+    def test_page_sleeps_once_and_requests_twice_when_initial_data_never_arrives(self):
+        with mock.patch.object(main.requests, "get", return_value=self._response(200, self.BLOCK_PAGE)) as get:
+            with mock.patch("builtins.print"):
+                with self.assertRaisesRegex(main.FalhaFonte, "mudou de formato"):
+                    main._solides_pagina("remoto/flutter", 1, {})
+        self.assertEqual(get.call_count, 2)
+        self.sleep.assert_called_once_with(main.PAUSA_NOVA_TENTATIVA_SOLIDES)
+
+    def test_page_with_initial_data_does_not_retry_or_sleep(self):
+        flight = initial_data_row([make_vaga()], total_pages=1)
+        with mock.patch.object(main.requests, "get", return_value=self._response(200, next_html(flight))) as get:
+            main._solides_pagina("remoto/flutter", 1, {})
+        self.assertEqual(get.call_count, 1)
+        self.sleep.assert_not_called()
+
+    def test_page_http_errors_are_not_retried(self):
+        for status in (403, 500):
+            with self.subTest(status=status):
+                self.sleep.reset_mock()
+                with mock.patch.object(main.requests, "get", return_value=self._response(status)) as get:
+                    with self.assertRaisesRegex(main.FalhaFonte, rf"o site recusou a busca \({status}\)"):
+                        main._solides_pagina("remoto/flutter", 1, {})
+                self.assertEqual(get.call_count, 1)
+                self.sleep.assert_not_called()
+
+    def test_page_logs_one_diagnostic_line_when_initial_data_never_arrives(self):
+        lines = self._diagnostic_lines(self.BLOCK_PAGE)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Solides sem initialData", lines[0])
+        self.assertIn("HTTP 200", lines[0])
+        self.assertIn(str(len(self.BLOCK_PAGE)), lines[0])
+        self.assertIn("Just a moment...", lines[0])
+        self.assertIn("self.__next_f.push: não", lines[0])
+        self.assertNotIn("MARCADOR-DO-CORPO", lines[0])
+
+    def test_page_diagnostic_reports_missing_title_and_next_push(self):
+        lines = self._diagnostic_lines(next_html('0:{"x":1}\n'))
+        self.assertEqual(len(lines), 1)
+        self.assertIn("(sem título)", lines[0])
+        self.assertIn("self.__next_f.push: sim", lines[0])
+
+    def test_page_http_error_on_retry_is_reported_as_refused(self):
+        responses = [self._response(200, self.BLOCK_PAGE), self._response(403)]
+        with mock.patch.object(main.requests, "get", side_effect=responses) as get:
+            with mock.patch("builtins.print") as printed:
+                with self.assertRaisesRegex(main.FalhaFonte, r"o site recusou a busca \(403\)"):
+                    main._solides_pagina("remoto/flutter", 1, {})
+        self.assertEqual(get.call_count, 2)
+        self.sleep.assert_called_once_with(main.PAUSA_NOVA_TENTATIVA_SOLIDES)
+        printed.assert_not_called()
+
+    def test_page_network_error_is_not_retried(self):
+        with mock.patch.object(main.requests, "get", side_effect=main.requests.Timeout()) as get:
+            with self.assertRaises(main.requests.RequestException):
+                main._solides_pagina("remoto/flutter", 1, {})
+        self.assertEqual(get.call_count, 1)
+        self.sleep.assert_not_called()
 
 
 class BuscarVagasSolidesTest(unittest.TestCase):

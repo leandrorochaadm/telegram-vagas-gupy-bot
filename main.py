@@ -239,6 +239,8 @@ FILTROS_SOLIDES = [
     {"nome": "FLUTTER · REMOTO", "caminho": "remoto/flutter"},
     # {"nome": "MOBILE · REMOTO",  "caminho": "remoto/mobile"},
 ]
+# Seconds to wait before retrying a Solides page that came without the job list.
+PAUSA_NOVA_TENTATIVA_SOLIDES = 5
 
 # Remotar: busca pela API pública (api.remotar.com.br). A busca também olha a
 # descrição, mas só vai para o grupo quem tiver TERMO_OBRIGATORIO_TITULO no título.
@@ -977,13 +979,24 @@ def _solides_textos(flight):
 def _solides_pagina(caminho, pagina, headers):
     """Retorna (vagas, total_paginas, textos) lidos da página pública da Solides."""
     url = f"https://vagas.solides.com.br/vagas/{caminho}"
-    resp = requests.get(url, headers=headers, params={'page': pagina}, timeout=20)
-    if resp.status_code != 200:
-        raise FalhaFonte(f"o site recusou a busca ({resp.status_code})")
-    flight = _solides_flight(resp.text)
-    inicio = flight.find('"initialData":')
-    if inicio == -1:
-        # initialData sumiu: a página mudou de layout
+    for tentativa in range(2):
+        resp = requests.get(url, headers=headers, params={'page': pagina}, timeout=20)
+        if resp.status_code != 200:
+            raise FalhaFonte(f"o site recusou a busca ({resp.status_code})")
+        flight = _solides_flight(resp.text)
+        inicio = flight.find('"initialData":')
+        if inicio != -1:
+            break
+        if tentativa == 0:
+            time.sleep(PAUSA_NOVA_TENTATIVA_SOLIDES)
+    else:
+        # initialData is still missing after the retry: the page layout changed
+        m = re.search(r'<title[^>]*>(.*?)</title>', resp.text, re.S | re.I)
+        titulo = re.sub(r'\s+', ' ', m.group(1)).strip()[:100] if m else ''
+        titulo = titulo or '(sem título)'
+        tem_push = 'sim' if 'self.__next_f.push' in resp.text else 'não'
+        print(f"   🔍 Solides sem initialData: HTTP {resp.status_code}, {len(resp.text)} caracteres, "
+              f"título: {titulo}, self.__next_f.push: {tem_push}")
         raise FalhaFonte("a página mudou de formato e o bot não conseguiu ler as vagas")
     dados, _ = json.JSONDecoder().raw_decode(flight, inicio + len('"initialData":'))
     return dados.get('data', []), dados.get('totalPages', 1), _solides_textos(flight)
