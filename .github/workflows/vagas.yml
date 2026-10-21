@@ -43,18 +43,48 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Instalar dependências
         run: pip install -r requirements.txt
+
+      # The browser build follows the playwright pin in requirements.txt, so its hash keys the cache
+      - name: Restaurar navegador do Playwright
+        id: playwright-cache
+        if: matrix.source == 'linkedin_posts' && env.HAS_LINKEDIN_LI_AT == 'true'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
 
       # Headless browser for the logged-in LinkedIn posts search (LINKEDIN_LI_AT).
       # Only when the secret exists; the step gets a true/false flag, never the cookie.
       # If it fails the bot still runs: posts fall back to the Brave search.
       - name: Instalar navegador do Playwright
+        id: playwright-install
         if: matrix.source == 'linkedin_posts' && env.HAS_LINKEDIN_LI_AT == 'true'
         continue-on-error: true
         timeout-minutes: 5
-        run: python -m playwright install --with-deps chromium
+        env:
+          PLAYWRIGHT_CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}
+        run: |
+          if [ "$PLAYWRIGHT_CACHE_HIT" = 'true' ]; then
+            python -m playwright install-deps chromium
+          else
+            python -m playwright install --with-deps chromium
+          fi
+
+      # Saved only after a full install that succeeded (a half-downloaded folder never gets cached).
+      # actions/cache@v4 would save at job end even when the install failed, hence restore + save.
+      - name: Guardar navegador do Playwright
+        if: matrix.source == 'linkedin_posts' && env.HAS_LINKEDIN_LI_AT == 'true' && steps.playwright-cache.outputs.cache-hit != 'true' && steps.playwright-install.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
 
       # Reuse one WARP account across runs instead of registering a new one every 30 min
       # (Cloudflare rate-limits registrations). Bump the key to force a fresh account.
@@ -142,6 +172,8 @@ jobs:
       # The journal goes too: a search killed mid-write leaves its rollback there.
       # Not when the search never started (setup failed): the merge then alerts that this site did not run
       - name: Guardar cópia do banco
+        id: upload
+        continue-on-error: true
         if: always() && steps.run.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
@@ -149,6 +181,21 @@ jobs:
           path: vagas_gupy.db*
           retention-days: 1
           if-no-files-found: ignore
+
+      # A network error while finalizing the upload loses the whole copy: wait and send it once more
+      - name: Esperar antes de reenviar a cópia
+        if: always() && steps.run.outcome != 'skipped' && steps.upload.outcome == 'failure'
+        run: sleep 15
+
+      - name: Guardar cópia do banco (nova tentativa)
+        if: always() && steps.run.outcome != 'skipped' && steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: db-${{ matrix.source }}
+          path: vagas_gupy.db*
+          retention-days: 1
+          if-no-files-found: ignore
+          overwrite: true
 
   # Runs last: merges the copies into vagas_gupy.db, sends every queued job (the same
   # job from two sites goes out once), sends one alert and makes a single commit
@@ -166,6 +213,8 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
 
       - name: Instalar dependências
         run: pip install -r requirements.txt

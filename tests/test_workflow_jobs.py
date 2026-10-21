@@ -41,6 +41,14 @@ def step_names(job: str) -> list[str]:
             if line.strip().startswith("- name: ")]
 
 
+def step_block(job: str, name: str) -> str:
+    """Text of the step `name` in `job`, up to the next step or the end of the job."""
+    lines = job_block(job).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == f"- name: {name}")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip().startswith("- name:")), len(lines))
+    return "\n".join(lines[start:end])
+
+
 def run_script(step_name: str) -> str:
     start = next(i for i, line in enumerate(LINES) if line.strip() == f"- name: {step_name}")
     run_at = next(i for i in range(start, len(LINES)) if LINES[i].strip() == "run: |")
@@ -141,6 +149,98 @@ class WorkflowLayoutTest(unittest.TestCase):
         step = block[block.index("- name: Enviar vagas"):block.index("- name: Enviar avisos")]
         self.assertIn("if: always() && steps.merge.outcome == 'success'", step)
         self.assertIn("run: python main.py --send-jobs", step)
+
+    def test_db_copy_upload_is_retried_with_overwrite_when_first_fails(self):
+        first, wait, retry = ("Guardar cópia do banco", "Esperar antes de reenviar a cópia",
+                              "Guardar cópia do banco (nova tentativa)")
+        names = step_names("buscar-vagas")
+        self.assertEqual(names[names.index(first):names.index(first) + 3], [first, wait, retry])
+        base_if = "if: always() && steps.run.outcome != 'skipped'"
+        retry_if = f"{base_if} && steps.upload.outcome == 'failure'"
+
+        first_step = step_block("buscar-vagas", first)
+        for text in ("id: upload", "continue-on-error: true", base_if):
+            self.assertIn(text, first_step)
+
+        wait_step = step_block("buscar-vagas", wait)
+        self.assertIn("run: sleep 15", wait_step)
+        self.assertIn(retry_if, wait_step)
+
+        retry_step = step_block("buscar-vagas", retry)
+        for text in (retry_if, "uses: actions/upload-artifact@v4", "name: db-${{ matrix.source }}",
+                     "path: vagas_gupy.db*", "retention-days: 1", "if-no-files-found: ignore",
+                     "overwrite: true"):
+            self.assertIn(text, retry_step)
+        self.assertNotIn("continue-on-error", retry_step)
+
+
+class DependencyCacheTest(unittest.TestCase):
+    PLAYWRIGHT_IF = "if: matrix.source == 'linkedin_posts' && env.HAS_LINKEDIN_LI_AT == 'true'"
+    RESTORE = "Restaurar navegador do Playwright"
+    INSTALL = "Instalar navegador do Playwright"
+    SAVE = "Guardar navegador do Playwright"
+
+    def lines_with(self, block: str, prefix: str) -> list[str]:
+        return [line.strip() for line in block.splitlines() if line.strip().startswith(prefix)]
+
+    def test_every_setup_python_caches_pip(self):
+        self.assertEqual(TEXT.count("uses: actions/setup-python@v6"), 2)
+        for job in ("buscar-vagas", "finalizar"):
+            step = step_block(job, "Configurar Python")
+            self.assertIn("cache: 'pip'", step)
+            self.assertIn("cache-dependency-path: requirements.txt", step)
+
+    def test_playwright_browser_is_cached_by_requirements_hash(self):
+        step = step_block("buscar-vagas", self.RESTORE)
+        for text in ("id: playwright-cache", "uses: actions/cache/restore@v4", "continue-on-error: true",
+                     "path: ~/.cache/ms-playwright", "hashFiles('requirements.txt')", self.PLAYWRIGHT_IF):
+            self.assertIn(text, step)
+        self.assertIn(self.PLAYWRIGHT_IF, step_block("buscar-vagas", self.INSTALL))
+        names = step_names("buscar-vagas")
+        self.assertEqual(names.index(self.RESTORE) + 1, names.index(self.INSTALL))
+
+    def run_install(self, cache_hit: str) -> tuple[subprocess.CompletedProcess, str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            path = os.path.join(bin_dir, "python")
+            with open(path, "w") as f:
+                f.write(FAKE_PYTHON)
+            os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+            env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", FAKE_STATE=tmp,
+                       PLAYWRIGHT_CACHE_HIT=cache_hit)
+            result = subprocess.run(["bash", "-e", "-c", run_script(self.INSTALL)],
+                                    env=env, capture_output=True, text=True)
+            with open(os.path.join(tmp, "python")) as f:
+                return result, f.read().strip()
+
+    def test_playwright_install_skips_download_on_cache_hit(self):
+        step = step_block("buscar-vagas", self.INSTALL)
+        for text in ("id: playwright-install", "continue-on-error: true", "timeout-minutes: 5",
+                     "PLAYWRIGHT_CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}"):
+            self.assertIn(text, step)
+        for cache_hit, expected in (("true", "-m playwright install-deps chromium"),
+                                    ("false", "-m playwright install --with-deps chromium"),
+                                    ("", "-m playwright install --with-deps chromium")):
+            result, called = self.run_install(cache_hit)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(called, expected)
+
+    def test_playwright_cache_is_saved_only_after_successful_install(self):
+        names = step_names("buscar-vagas")
+        self.assertEqual(names.index(self.INSTALL) + 1, names.index(self.SAVE))
+        step = step_block("buscar-vagas", self.SAVE)
+        for text in ("uses: actions/cache/save@v4", "continue-on-error: true",
+                     "steps.playwright-install.outcome == 'success'",
+                     "steps.playwright-cache.outputs.cache-hit != 'true'", "matrix.source == 'linkedin_posts'"):
+            self.assertIn(text, step)
+        restore = step_block("buscar-vagas", self.RESTORE)
+        for prefix in ("path:", "key:"):
+            self.assertEqual(self.lines_with(step, prefix), self.lines_with(restore, prefix))
+        for name in step_names("buscar-vagas"):
+            block = step_block("buscar-vagas", name)
+            if "uses: actions/cache@v4" in block:
+                self.assertNotIn("ms-playwright", block)
 
 
 if __name__ == "__main__":

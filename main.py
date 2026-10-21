@@ -91,8 +91,10 @@ FILTROS_LINKEDIN = [
     # {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile developer", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
 ]
 PAGINAS_LINKEDIN = 5  # a API guest devolve ~10 vagas por página
-# Quando o LinkedIn recusa por excesso de buscas (429), espera e tenta de novo uma vez.
-PAUSA_NOVA_TENTATIVA_LINKEDIN = 10
+# On 429, retry after growing pauses (or Retry-After, capped at the largest one), up to a total per run.
+PAUSAS_NOVA_TENTATIVA_LINKEDIN = (10, 30, 60)
+PAUSA_ENTRE_PAGINAS_LINKEDIN = 2
+PAUSA_TOTAL_MAXIMA_LINKEDIN = 180  # sum of the 429 pauses in one run
 
 # LinkedIn — publicações das últimas 24h (busca via Brave Search, requer BRAVE_API_KEY).
 # "termo" é pesquisado em site:linkedin.com/posts. Cada filtro × página = 1 consulta
@@ -239,6 +241,8 @@ FILTROS_SOLIDES = [
     {"nome": "FLUTTER · REMOTO", "caminho": "remoto/flutter"},
     # {"nome": "MOBILE · REMOTO",  "caminho": "remoto/mobile"},
 ]
+# Seconds to wait before retrying a Solides page that came without the job list.
+PAUSA_NOVA_TENTATIVA_SOLIDES = 5
 
 # Remotar: busca pela API pública (api.remotar.com.br). A busca também olha a
 # descrição, mas só vai para o grupo quem tiver TERMO_OBRIGATORIO_TITULO no título.
@@ -575,6 +579,25 @@ def buscar_vagas_linkedin(conn, cursor):
     print("\n🔷 LINKEDIN — iniciando varredura...")
     varrer_com_aviso("LINKEDIN", _varrer_linkedin, conn, cursor)
 
+def _linkedin_get(url: str, params: dict, headers: dict, pausa_restante: int) -> tuple[requests.Response, int]:
+    """GET on the LinkedIn guest API retrying 429 with growing pauses, within the remaining pause budget."""
+    resp = requests.get(url, params=params, headers=headers, timeout=15)
+    for pausa_padrao in PAUSAS_NOVA_TENTATIVA_LINKEDIN:
+        if resp.status_code != 429:
+            break
+        retry_after = resp.headers.get("Retry-After")
+        if isinstance(retry_after, str) and retry_after.strip().isdecimal():
+            pausa = min(int(retry_after.strip()), max(PAUSAS_NOVA_TENTATIVA_LINKEDIN))
+        else:
+            pausa = pausa_padrao
+        if pausa > pausa_restante:
+            break
+        print(f"   ⏳ LinkedIn pediu uma pausa, nova tentativa em {pausa}s")
+        time.sleep(pausa)
+        pausa_restante -= pausa
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+    return resp, pausa_restante
+
 def _varrer_linkedin(conn, cursor, erros):
     if not BS4_DISPONIVEL:
         print("   ⚠️  LinkedIn desativado: instale beautifulsoup4")
@@ -585,18 +608,16 @@ def _varrer_linkedin(conn, cursor, erros):
     }
     url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 
+    pausa_restante = PAUSA_TOTAL_MAXIMA_LINKEDIN
     for filtro in FILTROS_LINKEDIN:
         print(f"\n   🔎 {filtro['nome']}...")
         for pagina in range(PAGINAS_LINKEDIN):
             params = filtro["params"].copy()
             params["start"] = pagina * 10
+            if pagina > 0:
+                time.sleep(PAUSA_ENTRE_PAGINAS_LINKEDIN)
             try:
-                resp = requests.get(url, params=params, headers=headers, timeout=15)
-                if resp.status_code == 429:
-                    # Excesso de buscas: o LinkedIn costuma liberar logo depois
-                    print(f"   ⏳ LinkedIn pediu uma pausa, nova tentativa em {PAUSA_NOVA_TENTATIVA_LINKEDIN}s")
-                    time.sleep(PAUSA_NOVA_TENTATIVA_LINKEDIN)
-                    resp = requests.get(url, params=params, headers=headers, timeout=15)
+                resp, pausa_restante = _linkedin_get(url, params, headers, pausa_restante)
                 if resp.status_code != 200:
                     print(f"   🛑 HTTP {resp.status_code}")
                     erros.append(f"{filtro['nome']}: o LinkedIn recusou a busca ({resp.status_code}).")
@@ -646,8 +667,6 @@ def _varrer_linkedin(conn, cursor, erros):
                         f"🔗 <a href='{escapar(link)}'>Aplicar no LinkedIn</a>"
                     )
                     registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "LINKEDIN")
-
-                time.sleep(1)
 
             except Exception as e:
                 print(f"   ⚠️  Erro: {e}")
@@ -977,13 +996,24 @@ def _solides_textos(flight):
 def _solides_pagina(caminho, pagina, headers):
     """Retorna (vagas, total_paginas, textos) lidos da página pública da Solides."""
     url = f"https://vagas.solides.com.br/vagas/{caminho}"
-    resp = requests.get(url, headers=headers, params={'page': pagina}, timeout=20)
-    if resp.status_code != 200:
-        raise FalhaFonte(f"o site recusou a busca ({resp.status_code})")
-    flight = _solides_flight(resp.text)
-    inicio = flight.find('"initialData":')
-    if inicio == -1:
-        # initialData sumiu: a página mudou de layout
+    for tentativa in range(2):
+        resp = requests.get(url, headers=headers, params={'page': pagina}, timeout=20)
+        if resp.status_code != 200:
+            raise FalhaFonte(f"o site recusou a busca ({resp.status_code})")
+        flight = _solides_flight(resp.text)
+        inicio = flight.find('"initialData":')
+        if inicio != -1:
+            break
+        if tentativa == 0:
+            time.sleep(PAUSA_NOVA_TENTATIVA_SOLIDES)
+    else:
+        # initialData is still missing after the retry: the page layout changed
+        m = re.search(r'<title[^>]*>(.*?)</title>', resp.text, re.S | re.I)
+        titulo = re.sub(r'\s+', ' ', m.group(1)).strip()[:100] if m else ''
+        titulo = titulo or '(sem título)'
+        tem_push = 'sim' if 'self.__next_f.push' in resp.text else 'não'
+        print(f"   🔍 Solides sem initialData: HTTP {resp.status_code}, {len(resp.text)} caracteres, "
+              f"título: {titulo}, self.__next_f.push: {tem_push}")
         raise FalhaFonte("a página mudou de formato e o bot não conseguiu ler as vagas")
     dados, _ = json.JSONDecoder().raw_decode(flight, inicio + len('"initialData":'))
     return dados.get('data', []), dados.get('totalPages', 1), _solides_textos(flight)
@@ -1146,7 +1176,7 @@ OWNED_TABLES = {
 SKIPPED_TABLES = {"avisos_enviados"}
 
 AVISO_FONTE_INTERROMPIDA = "A busca parou antes do fim (travou ou deu erro). Os outros sites não foram afetados."
-AVISO_FONTE_SEM_BANCO = "A busca não rodou desta vez. Os outros sites não foram afetados."
+AVISO_FONTE_SEM_BANCO = "O resultado desta busca se perdeu antes do fim. Ela roda de novo na próxima vez. Os outros sites não foram afetados."
 AVISO_COPIA_ESTRAGADA = ("Não foi possível juntar o que este site salvou. "
                          "As vagas dele podem chegar repetidas na próxima execução.")
 

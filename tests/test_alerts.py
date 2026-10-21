@@ -227,19 +227,21 @@ class SourceErrorsTest(AlertTestCase):
         offsets = [call.kwargs["params"]["offset"] for call in get.call_args_list]
         self.assertEqual(offsets, [0, 15, 30])
 
-    def test_linkedin_waits_and_retries_once_when_limited(self):
+    def test_linkedin_retries_with_growing_pauses_until_allowed(self):
         with mock.patch.object(main, "FILTROS_LINKEDIN", [{"nome": "FLUTTER", "params": {}}]), \
              mock.patch.object(main, "PAGINAS_LINKEDIN", 1), \
              mock.patch.object(main.requests, "get", side_effect=[response(429), response(200)]) as get:
             main.buscar_vagas_linkedin(self.conn, self.cursor)
         self.assertEqual(get.call_count, 2)
-        self.sleep.assert_any_call(main.PAUSA_NOVA_TENTATIVA_LINKEDIN)
+        self.assertEqual(self.sleep.call_args_list, [mock.call(main.PAUSAS_NOVA_TENTATIVA_LINKEDIN[0])])
         self.assertEqual(main._avisos, [])
 
     def test_linkedin_still_limited_after_retry_is_noted(self):
         with mock.patch.object(main, "FILTROS_LINKEDIN", [{"nome": "FLUTTER", "params": {}}]), \
-             mock.patch.object(main.requests, "get", return_value=response(429)):
+             mock.patch.object(main.requests, "get", return_value=response(429)) as get:
             main.buscar_vagas_linkedin(self.conn, self.cursor)
+        self.assertEqual(get.call_count, 1 + len(main.PAUSAS_NOVA_TENTATIVA_LINKEDIN))
+        self.assertEqual(self.sleep.call_args_list, [mock.call(p) for p in main.PAUSAS_NOVA_TENTATIVA_LINKEDIN])
         self.assertEqual(main._avisos, [("LINKEDIN", "FLUTTER: o LinkedIn recusou a busca (429).")])
 
     def test_linkedin_posts_brave_refusal_is_noted(self):
