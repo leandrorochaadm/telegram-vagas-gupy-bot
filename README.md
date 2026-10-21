@@ -422,7 +422,7 @@ Quando algo dá errado, o bot avisa no próprio grupo. Os problemas de todas as 
 
 O que entra no aviso:
 
-- **Busca recusada ou sem resposta** em qualquer fonte (Gupy, ProgramaThor, LinkedIn, InHire, Solides, Remotar, web). Ex.: página da Solides que mudou de formato. Quando o LinkedIn pede uma pausa (excesso de buscas), o bot espera `PAUSA_NOVA_TENTATIVA_LINKEDIN` segundos e tenta de novo antes de avisar. Quando a página da Solides chega sem a lista de vagas (`initialData`), o bot espera `PAUSA_NOVA_TENTATIVA_SOLIDES` segundos e tenta de novo uma vez antes de avisar.
+- **Busca recusada ou sem resposta** em qualquer fonte (Gupy, ProgramaThor, LinkedIn, InHire, Solides, Remotar, web). Ex.: página da Solides que mudou de formato. Quando o LinkedIn pede uma pausa (excesso de buscas), o bot tenta de novo até 3 vezes, com pausas crescentes (`PAUSAS_NOVA_TENTATIVA_LINKEDIN`: 10, 30 e 60 s, ou o tempo que o LinkedIn pedir, até 60 s) antes de avisar; a espera somada na execução não passa de `PAUSA_TOTAL_MAXIMA_LINKEDIN` segundos, e entre uma página e outra o bot espera `PAUSA_ENTRE_PAGINAS_LINKEDIN` segundos. Quando a página da Solides chega sem a lista de vagas (`initialData`), o bot espera `PAUSA_NOVA_TENTATIVA_SOLIDES` segundos e tenta de novo uma vez antes de avisar.
 - **Cota da Brave esgotada** nas publicações do LinkedIn e na busca na web.
 - **Login do LinkedIn expirado** (`LINKEDIN_LI_AT`): avisa na hora e de novo a cada 24h, se a nova tentativa também falhar.
 - **Página de publicações do LinkedIn bloqueada ou diferente do esperado** (busca com login): quando o LinkedIn recusa a página ou ela não mostra nem publicações nem "nenhum resultado". Assim uma mudança no site não passa por "dia sem publicações".
