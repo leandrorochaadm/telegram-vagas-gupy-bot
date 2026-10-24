@@ -11,9 +11,12 @@ from unittest import mock
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import main  # noqa: E402
 import programathor  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Source, StoreError  # noqa: E402
 
 
 def card(href="/jobs/1-flutter-senior", title="Desenvolvedor(a) Flutter - Sênior", salary=None,
@@ -143,6 +146,47 @@ class SearchJobsTest(unittest.TestCase):
         errors = []
         self.run_with(requests.ConnectionError("down"), errors=errors)
         self.assertEqual(errors, ["FLUTTER · REMOTO: o site não respondeu."])
+
+
+class SearchJobsWithStoreTest(unittest.TestCase):
+
+    LINK = "https://programathor.com.br/jobs/1-flutter-senior"
+
+    def setUp(self):
+        self.db = FakeStore()
+        self.send = mock.Mock()
+
+    def run_with(self, responses, db=None, errors=None):
+        with mock.patch.object(programathor.requests, "get", side_effect=responses) as get, \
+             mock.patch.object(programathor.time, "sleep"):
+            programathor.search_jobs(db or self.db, filters=SearchJobsTest.FILTERS, user_agent="UA",
+                                     check=main.filtros_basicos, send=self.send, errors=errors)
+        return get
+
+    def test_sends_new_job_with_store_and_source(self):
+        self.run_with([response(page(card())), response(page())])
+        self.assertEqual(self.send.call_count, 1)
+        args = self.send.call_args.args
+        self.assertIs(args[0], self.db)
+        self.assertEqual(args[1], self.LINK)
+        self.assertIs(args[-1], Source.PROGRAMATHOR)
+
+    def test_skips_marked_link_and_stops(self):
+        self.db.mark_sent(self.LINK, "", "")
+        get = self.run_with([response(page(card()))])
+        self.send.assert_not_called()
+        self.assertEqual(get.call_count, 1)
+
+    def test_module_does_not_write_to_the_store(self):
+        self.run_with([response(page(card())), response(page())])
+        self.send.assert_called_once()
+        self.assertEqual(self.db.sent, {})
+
+    def test_store_error_becomes_alert_sentence(self):
+        errors = []
+        self.run_with([response(page(card()))], db=FakeStore(fail_with=StoreError()), errors=errors)
+        self.assertEqual(errors, ["FLUTTER · REMOTO: erro ao ler as vagas (o banco de vagas não respondeu)."])
+        self.send.assert_not_called()
 
 
 if __name__ == "__main__":

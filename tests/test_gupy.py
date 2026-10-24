@@ -12,9 +12,12 @@ from unittest import mock
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gupy  # noqa: E402
 import main  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Source, StoreError  # noqa: E402
 
 
 def utc_iso(days_ago=1):
@@ -216,6 +219,49 @@ class SearchJobsTest(unittest.TestCase):
                       errors=errors, filters=filters)
         self.assertEqual(errors, ["A: a Gupy recusou a busca (500)."])
         self.assertEqual(self.sent_links(), ["https://acme.gupy.io/jobs/1"])
+
+
+class SearchJobsWithStoreTest(unittest.TestCase):
+
+    def setUp(self):
+        self.db = FakeStore()
+        self.send = mock.Mock()
+
+    def run_with(self, responses, db=None):
+        with mock.patch.object(gupy.requests, "get", side_effect=responses) as get:
+            gupy.search_jobs(db or self.db, filters=SearchJobsTest.FILTERS, max_age_days=10,
+                             user_agent="UA", check=main.filtros_basicos, send=self.send)
+        return get
+
+    def test_sends_new_job_with_store_and_source(self):
+        job = api_job(published=utc_iso(days_ago=1))
+        self.run_with([response([job]), response([])])
+        self.assertEqual(
+            self.send.call_args.args,
+            (self.db, "https://acme.gupy.io/jobs/1", "Desenvolvedor Flutter Pleno", "Acme",
+             gupy._published(job).strftime("%d/%m/%Y"), self.send.call_args.args[5], Source.GUPY))
+
+    def test_skips_marked_link_and_sends_the_others(self):
+        self.db.mark_sent("https://acme.gupy.io/jobs/1", "", "")
+        self.run_with([response([api_job(1), api_job(2)]), response([])])
+        self.assertEqual([c.args[1] for c in self.send.call_args_list], ["https://acme.gupy.io/jobs/2"])
+
+    def test_stops_after_too_many_seen_in_a_row(self):
+        jobs = [api_job(n) for n in range(1, gupy.MAX_SEEN_IN_A_ROW + 2)]
+        for job in jobs:
+            self.db.mark_sent(job["jobUrl"], "", "")
+        get = self.run_with([response(jobs)])
+        self.send.assert_not_called()
+        self.assertEqual(get.call_count, 1)
+
+    def test_module_does_not_write_to_the_store(self):
+        self.run_with([response([api_job()]), response([])])
+        self.send.assert_called_once()
+        self.assertEqual(self.db.sent, {})
+
+    def test_store_error_propagates(self):
+        with self.assertRaises(StoreError):
+            self.run_with([response([api_job()])], db=FakeStore(fail_with=StoreError()))
 
 
 if __name__ == "__main__":
