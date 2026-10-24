@@ -6,7 +6,6 @@ import hashlib
 import html
 import json
 import time
-import sqlite3
 import requests
 import unicodedata
 import xml.etree.ElementTree as ET
@@ -19,6 +18,7 @@ import linkedin_posts
 import programathor
 import remotar
 import web_search
+from store import Source, Store, StoreError, from_env
 
 try:
     from bs4 import BeautifulSoup
@@ -31,7 +31,6 @@ AVISO_SEM_BS4 = "LinkedIn desligado: falta instalar o beautifulsoup4 (pip instal
 
 # --- 1. CONFIG ---
 DIRETORIO_ATUAL = os.path.dirname(os.path.abspath(__file__))
-CAMINHO_BANCO   = os.path.join(DIRETORIO_ATUAL, 'vagas_gupy.db')
 
 def carregar_env():
     caminho = os.path.join(DIRETORIO_ATUAL, '.env')
@@ -304,23 +303,6 @@ def titulo_relevante(titulo):
 
 # --- 3. BANCO E TELEGRAM ---
 
-def iniciar_banco():
-    conn   = sqlite3.connect(CAMINHO_BANCO)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS vagas_enviadas (
-            link TEXT PRIMARY KEY,
-            data_publicacao TEXT,
-            titulo TEXT
-        )
-    ''')
-    conn.commit()
-    return conn, cursor
-
-def ja_enviada(cursor, link):
-    cursor.execute('SELECT 1 FROM vagas_enviadas WHERE link = ?', (link,))
-    return cursor.fetchone() is not None
-
 def enviar_telegram(mensagem):
     payload = {
         "chat_id":                  CHAT_ID,
@@ -364,57 +346,52 @@ _falhas_envio = []
 # sends them all at the end, so the same job found by two sites goes out once
 _queue_jobs = False
 
-def queue_job(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte):
+ALERT_SENT_NOT_SAVED = "uma vaga foi enviada mas não ficou registrada: {title}. Ela pode chegar repetida uma vez."
+ALERT_DUPLICATE_NOT_SAVED = "uma vaga repetida não ficou registrada: {title}. Ela pode chegar repetida uma vez."
+ALERT_QUEUE_NOT_SENT = "Não foi possível enviar as vagas da fila: {error}. Elas vão na próxima execução."
+
+def queue_job(db: Store, link, titulo, empresa, data_f, mensagem, fonte: Source):
     """Save the job in the database for the --send-jobs step to send."""
-    cursor.execute(
-        "CREATE TABLE IF NOT EXISTS vagas_pendentes (link TEXT PRIMARY KEY, titulo TEXT, "
-        "empresa TEXT, data_publicacao TEXT, mensagem TEXT, fonte TEXT)"
-    )
-    cursor.execute("INSERT OR IGNORE INTO vagas_pendentes VALUES (?, ?, ?, ?, ?, ?)",
-                   (link, titulo, empresa, data_f, mensagem, fonte))
-    conn.commit()
+    db.queue_job(link, titulo, empresa, data_f, mensagem, fonte)
     print(f"   📥 Na fila: {titulo[:50]}")
 
-def send_queued_jobs(conn, cursor):
+def send_queued_jobs(db: Store):
     """Send the queued jobs in the order they were found (dedicated sites before web).
 
     A job that does not reach the group stays queued for the next run.
     """
-    if not cursor.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vagas_pendentes'"
-    ).fetchone():
-        return
-    queued = cursor.execute(
-        "SELECT link, titulo, empresa, data_publicacao, mensagem, fonte FROM vagas_pendentes ORDER BY rowid"
-    ).fetchall()
-    for link, titulo, empresa, data_f, mensagem, fonte in queued:
-        if not ja_enviada(cursor, link):
+    for job in db.queued_jobs():
+        if not db.is_sent(job.link):
             # Also skips the same job already sent from another site in this step
-            registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte)
-        if ja_enviada(cursor, link):
-            cursor.execute("DELETE FROM vagas_pendentes WHERE link = ?", (link,))
-            conn.commit()
+            registrar_e_enviar(db, job.link, job.title, job.company, job.published, job.message, job.source)
+        if db.is_sent(job.link):
+            db.delete_queued(job.id)
 
-def registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte):
+def registrar_e_enviar(db: Store, link, titulo, empresa, data_f, mensagem, fonte: Source):
     if _queue_jobs:
-        queue_job(conn, cursor, link, titulo, empresa, data_f, mensagem, fonte)
+        queue_job(db, link, titulo, empresa, data_f, mensagem, fonte)
         return
     chave = _chave_sessao(titulo, empresa)
     if chave in _enviados_sessao:
         print(f"   🔁 Duplicata (sessão): {titulo[:50]}")
         # Mark this source's link as seen too: otherwise, on the next run, this
         # source finds it unsent while the first one skips it, and it goes out twice
-        cursor.execute('INSERT OR IGNORE INTO vagas_enviadas VALUES (?, ?, ?)', (link, data_f, titulo))
-        conn.commit()
+        try:
+            db.mark_sent(link, data_f, titulo)
+        except StoreError:
+            anotar_avisos(Source.BOT, [ALERT_DUPLICATE_NOT_SAVED.format(title=titulo[:60])])
         return
     _enviados_sessao.add(chave)
     # Só marca como enviada se chegou: senão a vaga se perderia sem ninguém ver
     if enviar_telegram(mensagem):
-        cursor.execute('INSERT OR IGNORE INTO vagas_enviadas VALUES (?, ?, ?)', (link, data_f, titulo))
-        conn.commit()
-        print(f"   ✅ {titulo[:50]}...")
+        # The job already went out: a database failure must not stop the run
+        try:
+            db.mark_sent(link, data_f, titulo)
+            print(f"   ✅ {titulo[:50]}...")
+        except StoreError:
+            anotar_avisos(Source.BOT, [ALERT_SENT_NOT_SAVED.format(title=titulo[:60])])
     else:
-        _falhas_envio.append(f"{titulo[:60]} ({fonte})")
+        _falhas_envio.append(f"{titulo[:60]} ({fonte.label})")
     time.sleep(PAUSA_ENTRE_VAGAS)
 
 def resumir_lista(itens):
@@ -425,22 +402,22 @@ def resumir_lista(itens):
     return lista
 
 # Problemas desta execução, na ordem em que aconteceram: (fonte, texto)
-_avisos = []
+_avisos: list[tuple[Source, str]] = []
 
-def anotar_avisos(fonte, erros):
+def anotar_avisos(fonte: Source, erros):
     _avisos.extend((fonte, erro) for erro in erros)
 
-def varrer_com_aviso(fonte, varrer, conn, cursor):
-    """Roda varrer(conn, cursor, erros) sem deixar um erro derrubar as outras fontes.
+def varrer_com_aviso(fonte: Source, varrer, db: Store):
+    """Roda varrer(db, erros) sem deixar um erro derrubar as outras fontes.
 
     Os problemas que ela anotar em `erros` (e um erro inesperado) vão para o
     aviso único do fim da execução (enviar_avisos).
     """
     erros = []
     try:
-        varrer(conn, cursor, erros)
+        varrer(db, erros)
     except Exception as e:
-        print(f"   ❌ Varredura {fonte} interrompida: {e}")
+        print(f"   ❌ Varredura {fonte.label} interrompida: {e}")
         erros.append(f"A varredura parou no meio por um erro inesperado: {e}")
     anotar_avisos(fonte, erros)
 
@@ -455,7 +432,7 @@ def descrever_falha(filtro, e):
         return f"{filtro}: {e}."
     return f"{filtro}: erro ao ler as vagas ({e})."
 
-def montar_aviso(avisos):
+def montar_aviso(avisos: list[tuple[Source, str]]):
     """Uma mensagem com os problemas agrupados por fonte; repetidos viram "(3x)"."""
     por_fonte = {}
     for fonte, texto in avisos:
@@ -465,7 +442,7 @@ def montar_aviso(avisos):
     mensagem = "⚠️ <b>Problemas na varredura</b>"
     restantes = sum(len(contagem) for contagem in por_fonte.values())
     for fonte, contagem in por_fonte.items():
-        bloco = f"\n\n<b>{escapar(fonte)}</b>"
+        bloco = f"\n\n<b>{escapar(fonte.label)}</b>"
         for texto, vezes in contagem.items():
             linha = f"\n• {escapar(texto)}" + (f" ({vezes}x)" if vezes > 1 else "")
             if len(mensagem) + len(bloco) + len(linha) > TAMANHO_MAX_AVISO:
@@ -475,54 +452,47 @@ def montar_aviso(avisos):
         mensagem += bloco
     return mensagem
 
-def store_alerts(conn, cursor):
+def store_alerts(db: Store):
     """Save this run's problems in the database, for the next alert to send."""
-    cursor.execute("CREATE TABLE IF NOT EXISTS avisos_pendentes (fonte TEXT, texto TEXT)")
-    cursor.executemany("INSERT INTO avisos_pendentes VALUES (?, ?)", _avisos)
-    conn.commit()
+    db.add_alerts([(fonte.api_value, texto) for fonte, texto in _avisos])
     # Only once saved: if the database fails, main still sends these directly
     _avisos.clear()
 
-def enviar_avisos(conn, cursor, agora=None):
+def enviar_avisos(db: Store, agora=None):
     """Manda os problemas guardados numa mensagem só, no máximo uma a cada INTERVALO_AVISOS_MIN.
 
     Dentro do intervalo, ou se o Telegram falhar, eles ficam no banco e vão no próximo aviso.
     """
-    # UTC: o banco vai para o repositório e roda tanto no GitHub (UTC) quanto
-    # localmente (horário de Brasília); hora local faria o intervalo errar em 3h
+    # UTC: the store only takes timezone-aware datetimes
     agora = agora or datetime.now(timezone.utc)
-    store_alerts(conn, cursor)
-    cursor.execute("CREATE TABLE IF NOT EXISTS avisos_enviados (enviado_em TEXT)")
+    store_alerts(db)
 
-    pendentes = cursor.execute("SELECT fonte, texto FROM avisos_pendentes ORDER BY rowid").fetchall()
+    pendentes = db.pending_alerts()
     if not pendentes:
         return
-    ultimo = cursor.execute("SELECT enviado_em FROM avisos_enviados").fetchone()
-    if ultimo and agora - datetime.fromisoformat(ultimo[0]) < timedelta(minutes=INTERVALO_AVISOS_MIN):
+    ultimo = db.last_alert_at()
+    if ultimo and agora - ultimo < timedelta(minutes=INTERVALO_AVISOS_MIN):
         print(f"\n⏳ {len(pendentes)} problemas guardados para o próximo aviso (um a cada {INTERVALO_AVISOS_MIN} min)")
         return
-    if enviar_telegram(montar_aviso(pendentes)):
-        cursor.execute("DELETE FROM avisos_pendentes")
-        cursor.execute("DELETE FROM avisos_enviados")
-        cursor.execute("INSERT INTO avisos_enviados VALUES (?)", (agora.isoformat(timespec="seconds"),))
-        conn.commit()
+    if enviar_telegram(montar_aviso([(Source.from_api(a.label), a.text) for a in pendentes])):
+        # Only the alerts read above: another job may have saved more meanwhile
+        db.delete_alerts([a.id for a in pendentes])
+        db.set_last_alert_at(agora)
 
-def brave_due(conn, cursor, source, interval_min, now=None):
+def brave_due(db: Store, source: Source, interval_min, now=None):
     """True when `source` last used the Brave quota `interval_min` minutes ago or more.
 
     When due, the current time is saved as the source's last search.
     """
-    # UTC for the same reason as enviar_avisos: the db travels between GitHub and local runs
+    # UTC: the store only takes timezone-aware datetimes
     now = now or datetime.now(timezone.utc)
-    cursor.execute("CREATE TABLE IF NOT EXISTS brave_searches (source TEXT PRIMARY KEY, searched_at TEXT)")
-    row = cursor.execute("SELECT searched_at FROM brave_searches WHERE source = ?", (source,)).fetchone()
+    ultimo = db.brave_searched_at(source.api_value)
     wait = timedelta(minutes=interval_min - FOLGA_INTERVALO_BRAVE_MIN)
-    if row and now - datetime.fromisoformat(row[0]) < wait:
-        print(f"\n⏳ {source}: busca na Brave pulada (uma a cada {interval_min} min, para caber na cota)")
+    if ultimo and now - ultimo < wait:
+        print(f"\n⏳ {source.label}: busca na Brave pulada (uma a cada {interval_min} min, para caber na cota)")
         return False
     # Saved before searching: a failed search still spends quota
-    cursor.execute("INSERT OR REPLACE INTO brave_searches VALUES (?, ?)", (source, now.isoformat(timespec="seconds")))
-    conn.commit()
+    db.set_brave_searched_at(source.api_value, now)
     return True
 
 def filtros_basicos(titulo, empresa=None):
@@ -538,13 +508,13 @@ def filtros_basicos(titulo, empresa=None):
 
 # --- 4. GUPY ---
 
-def buscar_vagas_gupy(conn, cursor):
+def buscar_vagas_gupy(db):
     print("\n🟣 GUPY — iniciando varredura...")
-    varrer_com_aviso("GUPY", _varrer_gupy, conn, cursor)
+    varrer_com_aviso(Source.GUPY, _varrer_gupy, db)
 
-def _varrer_gupy(conn, cursor, erros):
+def _varrer_gupy(db, erros):
     gupy.search_jobs(
-        conn, cursor,
+        db,
         filters=FILTROS_GUPY,
         max_age_days=DIAS_BUSCA_GUPY,
         user_agent=USER_AGENT,
@@ -555,16 +525,16 @@ def _varrer_gupy(conn, cursor, erros):
 
 # --- 5. PROGRAMATHOR ---
 
-def buscar_vagas_programathor(conn, cursor):
+def buscar_vagas_programathor(db):
     print("\n🟤 PROGRAMATHOR — iniciando varredura...")
-    varrer_com_aviso("PROGRAMATHOR", _varrer_programathor, conn, cursor)
+    varrer_com_aviso(Source.PROGRAMATHOR, _varrer_programathor, db)
 
-def _varrer_programathor(conn, cursor, erros):
+def _varrer_programathor(db, erros):
     if not BS4_DISPONIVEL:
         print("   ⚠️  ProgramaThor desativado: instale beautifulsoup4")
         return
     programathor.search_jobs(
-        conn, cursor,
+        db,
         filters=FILTROS_PROGRAMATHOR,
         user_agent=USER_AGENT,
         proxy=SCRAPER_PROXY,
@@ -575,9 +545,9 @@ def _varrer_programathor(conn, cursor, erros):
 
 # --- 6. LINKEDIN ---
 
-def buscar_vagas_linkedin(conn, cursor):
+def buscar_vagas_linkedin(db):
     print("\n🔷 LINKEDIN — iniciando varredura...")
-    varrer_com_aviso("LINKEDIN", _varrer_linkedin, conn, cursor)
+    varrer_com_aviso(Source.LINKEDIN, _varrer_linkedin, db)
 
 def _linkedin_get(url: str, params: dict, headers: dict, pausa_restante: int) -> tuple[requests.Response, int]:
     """GET on the LinkedIn guest API retrying 429 with growing pauses, within the remaining pause budget."""
@@ -598,7 +568,7 @@ def _linkedin_get(url: str, params: dict, headers: dict, pausa_restante: int) ->
         resp = requests.get(url, params=params, headers=headers, timeout=15)
     return resp, pausa_restante
 
-def _varrer_linkedin(conn, cursor, erros):
+def _varrer_linkedin(db, erros):
     if not BS4_DISPONIVEL:
         print("   ⚠️  LinkedIn desativado: instale beautifulsoup4")
         return
@@ -656,7 +626,7 @@ def _varrer_linkedin(conn, cursor, erros):
                         print(f"   {motivo}")
                         continue
 
-                    if ja_enviada(cursor, link):
+                    if db.is_sent(link):
                         continue
 
                     mensagem = (
@@ -666,7 +636,7 @@ def _varrer_linkedin(conn, cursor, erros):
                         f"📅 <b>Data:</b> {data_f}\n\n"
                         f"🔗 <a href='{escapar(link)}'>Aplicar no LinkedIn</a>"
                     )
-                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "LINKEDIN")
+                    registrar_e_enviar(db, link, titulo, empresa, data_f, mensagem, Source.LINKEDIN)
 
             except Exception as e:
                 print(f"   ⚠️  Erro: {e}")
@@ -675,85 +645,71 @@ def _varrer_linkedin(conn, cursor, erros):
 
 # --- 6b. LINKEDIN (PUBLICAÇÕES) ---
 
-def buscar_posts_linkedin(conn, cursor):
+def buscar_posts_linkedin(db):
     if not LINKEDIN_LI_AT and not BRAVE_API_KEY:
         print("\n⚠️  Publicações do LinkedIn desativadas: defina LINKEDIN_LI_AT ou BRAVE_API_KEY no .env")
         return
 
     print("\n📝 LINKEDIN PUBLICAÇÕES — iniciando varredura...")
-    varrer_com_aviso("LINKEDIN PUBLICAÇÕES", _varrer_posts_linkedin, conn, cursor)
+    varrer_com_aviso(Source.LINKEDIN_POSTS, _varrer_posts_linkedin, db)
 
-def _varrer_posts_linkedin(conn, cursor, erros):
+def _varrer_posts_linkedin(db, erros):
     if LINKEDIN_LI_AT:
-        estado = estado_login_linkedin(conn, cursor, LINKEDIN_LI_AT)
+        estado = estado_login_linkedin(db, LINKEDIN_LI_AT)
         if estado == "espera":
             return
-        if estado == "ok" and _posts_com_login(conn, cursor, erros):
+        if estado == "ok" and _posts_com_login(db, erros):
             return
     # Sem cookie, com o cookie caído ou sem Playwright: a Brave é a reserva
-    if BRAVE_API_KEY and brave_due(conn, cursor, "LINKEDIN PUBLICAÇÕES", INTERVALO_POSTS_LINKEDIN_MIN):
-        _posts_pela_brave(conn, cursor, erros)
+    if BRAVE_API_KEY and brave_due(db, Source.LINKEDIN_POSTS, INTERVALO_POSTS_LINKEDIN_MIN):
+        _posts_pela_brave(db, erros)
 
 def _hash_cookie(cookie):
-    # Only a fingerprint goes to the db: it is committed to a public repo
+    # Only a fingerprint goes to the database: the cookie is a secret
     return hashlib.sha256(cookie.encode()).hexdigest()[:16]
 
-def estado_login_linkedin(conn, cursor, cookie, agora=None):
+def estado_login_linkedin(db: Store, cookie, agora=None):
     """"ok" (pode buscar agora), "espera" (dentro do intervalo) ou "expirado" (pausado).
 
     Com o cookie caído, devolve "ok" uma vez a cada INTERVALO_LEMBRETE_COOKIE_HORAS
     para tentar de novo: se falhar, marcar_login_expirado repete o aviso.
     Um cookie novo (secret trocado) recomeça do zero.
     """
-    # UTC for the same reason as enviar_avisos: the db travels between GitHub and local runs
+    # UTC: the store only takes timezone-aware datetimes
     agora = agora or datetime.now(timezone.utc)
-    agora_iso = agora.isoformat(timespec="seconds")
     chave = _hash_cookie(cookie)
-    cursor.execute("CREATE TABLE IF NOT EXISTS linkedin_session "
-                   "(cookie_hash TEXT PRIMARY KEY, searched_at TEXT, expired_at TEXT, reminded_at TEXT)")
-    cursor.execute("DELETE FROM linkedin_session WHERE cookie_hash != ?", (chave,))
-    linha = cursor.execute("SELECT searched_at, expired_at, reminded_at FROM linkedin_session "
-                           "WHERE cookie_hash = ?", (chave,)).fetchone()
-    conn.commit()
+    db.delete_linkedin_sessions_except(chave)
+    sessao = db.linkedin_session(chave)
     folga = timedelta(minutes=FOLGA_INTERVALO_BRAVE_MIN)
 
-    if linha and linha[1]:
+    if sessao and sessao.expired_at:
         lembrete = timedelta(hours=INTERVALO_LEMBRETE_COOKIE_HORAS) - folga
-        if agora - datetime.fromisoformat(linha[2]) < lembrete:
+        if sessao.reminded_at and agora - sessao.reminded_at < lembrete:
             print("\n🔒 LinkedIn: cookie de login expirado, busca logada pausada até o secret mudar")
             return "expirado"
         print(f"\n🔁 LinkedIn: cookie expirado há {INTERVALO_LEMBRETE_COOKIE_HORAS}h, tentando de novo")
         # Saved before searching: a retry that fails for another reason waits another day
-        cursor.execute("UPDATE linkedin_session SET searched_at = ?, reminded_at = ? WHERE cookie_hash = ?",
-                       (agora_iso, agora_iso, chave))
-        conn.commit()
+        db.save_linkedin_session(chave, searched_at=agora, reminded_at=agora)
         return "ok"
 
     espera = timedelta(minutes=INTERVALO_POSTS_LINKEDIN_LOGIN_MIN) - folga
-    if linha and linha[0] and agora - datetime.fromisoformat(linha[0]) < espera:
+    if sessao and sessao.searched_at and agora - sessao.searched_at < espera:
         print(f"\n⏳ LinkedIn: busca logada pulada (uma a cada {INTERVALO_POSTS_LINKEDIN_LOGIN_MIN} min)")
         return "espera"
     # Saved before searching, like brave_due: a failed search still counts as an access
-    cursor.execute("INSERT INTO linkedin_session (cookie_hash, searched_at) VALUES (?, ?) "
-                   "ON CONFLICT(cookie_hash) DO UPDATE SET searched_at = excluded.searched_at",
-                   (chave, agora_iso))
-    conn.commit()
+    db.save_linkedin_session(chave, searched_at=agora)
     return "ok"
 
-def marcar_login_expirado(conn, cursor, cookie, erros, agora=None):
-    agora = (agora or datetime.now(timezone.utc)).isoformat(timespec="seconds")
-    cursor.execute("UPDATE linkedin_session SET expired_at = ?, reminded_at = ? WHERE cookie_hash = ?",
-                   (agora, agora, _hash_cookie(cookie)))
-    conn.commit()
+def marcar_login_expirado(db: Store, cookie, erros, agora=None):
+    agora = agora or datetime.now(timezone.utc)
+    db.save_linkedin_session(_hash_cookie(cookie), expired_at=agora, reminded_at=agora)
     erros.append(AVISO_COOKIE_LINKEDIN)
 
-def marcar_login_valido(conn, cursor, cookie):
+def marcar_login_valido(db: Store, cookie):
     """LinkedIn aceitou o cookie: tira a pausa, se havia (o mesmo cookie voltou a valer)."""
-    cursor.execute("UPDATE linkedin_session SET expired_at = NULL, reminded_at = NULL WHERE cookie_hash = ?",
-                   (_hash_cookie(cookie),))
-    conn.commit()
+    db.save_linkedin_session(_hash_cookie(cookie), expired_at=None, reminded_at=None)
 
-def _posts_com_login(conn, cursor, erros):
+def _posts_com_login(db, erros):
     """Busca logada. False quando ela não pôde rodar (cookie caído, sem Playwright): vale a reserva."""
     if not BS4_DISPONIVEL:
         return False
@@ -765,7 +721,7 @@ def _posts_com_login(conn, cursor, erros):
                                                 period=PERIODO_POSTS_LINKEDIN_LOGIN)
         except linkedin_login.LoginExpired as e:
             print(f"   🔒 O LinkedIn pediu login de novo ({e}): cookie expirado")
-            marcar_login_expirado(conn, cursor, LINKEDIN_LI_AT, erros)
+            marcar_login_expirado(db, LINKEDIN_LI_AT, erros)
             return False
         except ImportError:
             print("   ⚠️  Busca logada desativada: instale o playwright (pip install playwright)")
@@ -783,12 +739,12 @@ def _posts_com_login(conn, cursor, erros):
             erros.append(descrever_falha(filtro['nome'], e))
             continue
         # Only a search that went through proves the cookie is valid again
-        marcar_login_valido(conn, cursor, LINKEDIN_LI_AT)
+        marcar_login_valido(db, LINKEDIN_LI_AT)
         print(f"   📄 {len(posts)} publicações na página")
-        _enviar_posts_linkedin(conn, cursor, filtro, posts)
+        _enviar_posts_linkedin(db, filtro, posts)
     return True
 
-def _posts_pela_brave(conn, cursor, erros):
+def _posts_pela_brave(db, erros):
     for filtro in FILTROS_POSTS_LINKEDIN:
         print(f"\n   🔎 {filtro['nome']}...")
         falhas_brave = []
@@ -801,9 +757,9 @@ def _posts_pela_brave(conn, cursor, erros):
             continue
         # 429 = cota mensal da Brave esgotada ou buscas demais
         erros += [f"{filtro['nome']}: a Brave recusou a busca ({falha})." for falha in falhas_brave]
-        _enviar_posts_linkedin(conn, cursor, filtro, posts)
+        _enviar_posts_linkedin(db, filtro, posts)
 
-def _enviar_posts_linkedin(conn, cursor, filtro, posts):
+def _enviar_posts_linkedin(db, filtro, posts):
     for post in posts:
         texto, autor, link = post["text"], post["author"], post["link"]
 
@@ -816,7 +772,7 @@ def _enviar_posts_linkedin(conn, cursor, filtro, posts):
             print(f"   {motivo}")
             continue
 
-        if ja_enviada(cursor, link):
+        if db.is_sent(link):
             continue
 
         resumo = texto if len(texto) <= 300 else texto[:300].rsplit(" ", 1)[0] + "…"
@@ -828,13 +784,13 @@ def _enviar_posts_linkedin(conn, cursor, filtro, posts):
             f"💬 {escapar(resumo)}\n\n"
             f"🔗 <a href='{escapar(link)}'>Ver publicação</a>"
         )
-        registrar_e_enviar(conn, cursor, link, texto, autor, post["date"], mensagem, "LINKEDIN_POST")
+        registrar_e_enviar(db, link, texto, autor, post["date"], mensagem, Source.LINKEDIN_POSTS)
 
 # --- 7. INHIRE ---
 
-def buscar_vagas_inhire(conn, cursor):
+def buscar_vagas_inhire(db):
     print("\n🟣 INHIRE — iniciando varredura...")
-    varrer_com_aviso("INHIRE", _varrer_inhire, conn, cursor)
+    varrer_com_aviso(Source.INHIRE, _varrer_inhire, db)
 
 def _get_inhire(url, headers):
     """GET na API da Inhire com uma nova tentativa: ela às vezes falha e volta logo em seguida."""
@@ -849,14 +805,14 @@ def _get_inhire(url, headers):
                 return resp
         time.sleep(PAUSA_NOVA_TENTATIVA_INHIRE)
 
-def _varrer_inhire(conn, cursor, erros):
+def _varrer_inhire(db, erros):
     headers = {
         'User-Agent': USER_AGENT,
     }
     url_base = "https://api.inhire.app/job-posts/public/pages"
 
     empresas = inhire_discovery.discover(
-        conn, cursor,
+        db,
         queries=TERMOS_DESCOBERTA_INHIRE,
         brave_api_key=BRAVE_API_KEY if USAR_BRAVE_DESCOBERTA_INHIRE else None,
         every=timedelta(days=DIAS_DESCOBERTA_INHIRE),
@@ -917,7 +873,7 @@ def _varrer_inhire(conn, cursor, erros):
                         print(f"   {motivo}")
                         continue
                         
-                    if ja_enviada(cursor, link):
+                    if db.is_sent(link):
                         continue
                         
                     local = job.get('location') or 'Não informado'
@@ -932,7 +888,7 @@ def _varrer_inhire(conn, cursor, erros):
                         f"📅 <b>Data (Descoberta):</b> {data_f}\n\n"
                         f"🔗 <a href='{escapar(link)}'>Aplicar na Inhire</a>"
                     )
-                    registrar_e_enviar(conn, cursor, link, titulo, nome_empresa, data_f, mensagem, "INHIRE")
+                    registrar_e_enviar(db, link, titulo, nome_empresa, data_f, mensagem, Source.INHIRE)
                     
         except requests.RequestException as e:
             print(f"   ⚠️  Inhire não respondeu para {empresa_slug}: {e}")
@@ -948,7 +904,7 @@ def _varrer_inhire(conn, cursor, erros):
                      "Parece uma mudança na Inhire, então nenhuma foi apagada.")
     else:
         for empresa_slug in inexistentes:
-            inhire_discovery.remove_tenant(conn, cursor, empresa_slug)
+            inhire_discovery.remove_tenant(db, empresa_slug)
         if inexistentes:
             print(f"   🗑️  {len(inexistentes)} empresas removidas da lista: {', '.join(inexistentes)}")
 
@@ -1018,11 +974,11 @@ def _solides_pagina(caminho, pagina, headers):
     dados, _ = json.JSONDecoder().raw_decode(flight, inicio + len('"initialData":'))
     return dados.get('data', []), dados.get('totalPages', 1), _solides_textos(flight)
 
-def buscar_vagas_solides(conn, cursor):
+def buscar_vagas_solides(db):
     print("\n🟢 SOLIDES — iniciando varredura...")
-    varrer_com_aviso("SOLIDES", _varrer_solides, conn, cursor)
+    varrer_com_aviso(Source.SOLIDES, _varrer_solides, db)
 
-def _varrer_solides(conn, cursor, erros):
+def _varrer_solides(db, erros):
     headers = {
         'User-Agent': USER_AGENT,
     }
@@ -1054,7 +1010,7 @@ def _varrer_solides(conn, cursor, erros):
                         print(f"   {motivo}")
                         continue
 
-                    if ja_enviada(cursor, link):
+                    if db.is_sent(link):
                         continue
 
                     data_iso = vaga.get('createdAt', '')
@@ -1088,7 +1044,7 @@ def _varrer_solides(conn, cursor, erros):
                         f"📅 <b>Data:</b> {escapar(data_f)}\n\n"
                         f"🔗 <a href='{escapar(link)}'>Aplicar na Solides</a>"
                     )
-                    registrar_e_enviar(conn, cursor, link, titulo, empresa, data_f, mensagem, "SOLIDES")
+                    registrar_e_enviar(db, link, titulo, empresa, data_f, mensagem, Source.SOLIDES)
 
                 if pagina >= total_pages:
                     break
@@ -1100,13 +1056,13 @@ def _varrer_solides(conn, cursor, erros):
 
 # --- 9. REMOTAR ---
 
-def buscar_vagas_remotar(conn, cursor):
+def buscar_vagas_remotar(db):
     print("\n🟠 REMOTAR — iniciando varredura...")
-    varrer_com_aviso("REMOTAR", _varrer_remotar, conn, cursor)
+    varrer_com_aviso(Source.REMOTAR, _varrer_remotar, db)
 
-def _varrer_remotar(conn, cursor, erros):
+def _varrer_remotar(db, erros):
     remotar.search_jobs(
-        conn, cursor,
+        db,
         filters=FILTROS_REMOTAR,
         max_age_days=DIAS_BUSCA_REMOTAR,
         ignore_foreign=IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR,
@@ -1118,14 +1074,14 @@ def _varrer_remotar(conn, cursor, erros):
 
 # --- MAIN ---
 
-def buscar_vagas_web(conn, cursor):
-    varrer_com_aviso("WEB", _varrer_web, conn, cursor)
+def buscar_vagas_web(db):
+    varrer_com_aviso(Source.WEB, _varrer_web, db)
 
-def _varrer_web(conn, cursor, erros):
-    if BRAVE_API_KEY and not brave_due(conn, cursor, "WEB", INTERVALO_WEB_MIN):
+def _varrer_web(db, erros):
+    if BRAVE_API_KEY and not brave_due(db, Source.WEB, INTERVALO_WEB_MIN):
         return
     web_search.search_jobs(
-        conn, cursor,
+        db,
         api_key=BRAVE_API_KEY,
         filters=FILTROS_WEB,
         pages=PAGINAS_WEB,
@@ -1142,26 +1098,27 @@ def anotar_falhas_envio():
     """Anota no aviso as vagas que o Telegram não entregou nesta execução."""
     if not _falhas_envio:
         return
-    anotar_avisos("TELEGRAM", [
+    anotar_avisos(Source.TELEGRAM, [
         f"{len(_falhas_envio)} vagas não chegaram ao grupo: {resumir_lista(_falhas_envio)}. "
         "Elas serão enviadas de novo na próxima execução."
     ])
 
-# Sources the workflow runs as parallel jobs (python main.py --source <name>):
-# name -> (function name, label used in the alert). Function names, not the
-# functions, so tests can patch them. Order = sequential order of a full run.
-SOURCES = {
-    "gupy": ("buscar_vagas_gupy", "GUPY"),
-    "linkedin": ("buscar_vagas_linkedin", "LINKEDIN"),
-    "linkedin_posts": ("buscar_posts_linkedin", "LINKEDIN PUBLICAÇÕES"),
-    "inhire": ("buscar_vagas_inhire", "INHIRE"),
-    "solides": ("buscar_vagas_solides", "SOLIDES"),
-    "remotar": ("buscar_vagas_remotar", "REMOTAR"),
-    # Last: dedicated sources send richer messages for the same links.
-    "web": ("buscar_vagas_web", "WEB"),
+# Sources the workflow runs as parallel jobs (python main.py --source <name>).
+# Function names, not the functions, so tests can patch them. The order of a
+# full run comes from Source.search_sources().
+SOURCE_FUNCTIONS = {
+    Source.GUPY: "buscar_vagas_gupy",
+    Source.LINKEDIN: "buscar_vagas_linkedin",
+    Source.LINKEDIN_POSTS: "buscar_posts_linkedin",
+    Source.INHIRE: "buscar_vagas_inhire",
+    Source.SOLIDES: "buscar_vagas_solides",
+    Source.REMOTAR: "buscar_vagas_remotar",
+    Source.WEB: "buscar_vagas_web",
 }
+# command line key -> (function name, source)
+SOURCES = {s.api_value: (SOURCE_FUNCTIONS[s], s) for s in Source.search_sources()}
 # Sources that skip the scan without beautifulsoup4
-BS4_SOURCES = {"linkedin"}
+BS4_SOURCES = {Source.LINKEDIN.api_value}
 
 AVISO_FONTE_INTERROMPIDA = "A busca parou antes do fim (travou ou deu erro). Os outros sites não foram afetados."
 
@@ -1184,11 +1141,12 @@ def main(argv=()):
         return
 
     try:
-        conn, cursor = iniciar_banco()
+        db = from_env()
+        db.connect()
     except Exception as e:
         print(f"❌ Erro ao abrir o banco: {e}")
         # Sem banco não dá para guardar o aviso: vai direto
-        enviar_telegram(montar_aviso([("BOT", f"Não foi possível abrir o banco de vagas, nenhuma busca foi feita: {e}")]))
+        enviar_telegram(montar_aviso([(Source.BOT, f"Não foi possível abrir o banco de vagas, nenhuma busca foi feita: {e}")]))
         return
 
     # Parallel jobs only save their problems: the --send-alerts step sends one alert for all
@@ -1201,12 +1159,15 @@ def main(argv=()):
     else:
         sources = list(SOURCES)
     if not BS4_DISPONIVEL and BS4_SOURCES & set(sources):
-        anotar_avisos("BOT", [AVISO_SEM_BS4])
+        anotar_avisos(Source.BOT, [AVISO_SEM_BS4])
     for source in sources:
-        globals()[SOURCES[source][0]](conn, cursor)
+        globals()[SOURCES[source][0]](db)
     # Full run: also sends what a workflow run left queued (e.g. Telegram refused it)
     if args.send_jobs or not (parallel_step or args.send_alerts):
-        send_queued_jobs(conn, cursor)
+        try:
+            send_queued_jobs(db)
+        except StoreError as e:
+            anotar_avisos(Source.BOT, [ALERT_QUEUE_NOT_SENT.format(error=e)])
     anotar_falhas_envio()
 
     if args.failed:
@@ -1214,15 +1175,14 @@ def main(argv=()):
 
     try:
         if parallel_step:
-            store_alerts(conn, cursor)
+            store_alerts(db)
         else:
-            enviar_avisos(conn, cursor)
+            enviar_avisos(db)
     except Exception as e:
         # Banco falhou ao guardar os avisos: manda os desta execução direto
         print(f"❌ Erro ao guardar os avisos: {e}")
-        enviar_telegram(montar_aviso(_avisos + [("BOT", f"Não foi possível guardar os avisos no banco: {e}")]))
+        enviar_telegram(montar_aviso(_avisos + [(Source.BOT, f"Não foi possível guardar os avisos no banco: {e}")]))
 
-    conn.close()
     print("\n✅ Varredura completa!" if sources else "\n✅ Pronto!")
 
 if __name__ == '__main__':

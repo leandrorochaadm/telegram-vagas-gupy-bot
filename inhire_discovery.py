@@ -2,17 +2,18 @@
 
 InHire has no public list of companies: its job API needs each company's
 subdomain (empresa.inhire.app). So we search the web for pages on *.inhire.app
-and keep every subdomain found in SQLite. Each discovery run adds new ones,
+and keep every subdomain found in the bot's database. Each discovery run adds new ones,
 so the list keeps growing over time. Sources: Yahoo (free) and Brave (optional).
 """
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
 
 import requests
 
 from linkedin_posts import BRAVE_URL, MAX_OFFSET, REQUEST_INTERVAL, RESULTS_PER_PAGE
+from store import Store
 
 YAHOO_URL = "https://search.yahoo.com/search"
 YAHOO_PAGES = 5         # result pages read per query
@@ -90,47 +91,34 @@ def search_brave(api_key: str, query: str) -> tuple[set[str], str | None]:
     return tenants, None
 
 
-def init_tables(cursor) -> None:
-    cursor.execute("CREATE TABLE IF NOT EXISTS inhire_tenants (slug TEXT PRIMARY KEY, found_at TEXT)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS inhire_discovery (last_run TEXT, found INTEGER)")
-    # Databases created before the `found` column existed
-    columns = {row[1] for row in cursor.execute("PRAGMA table_info(inhire_discovery)")}
-    if "found" not in columns:
-        cursor.execute("ALTER TABLE inhire_discovery ADD COLUMN found INTEGER")
+def load_tenants(db: Store) -> list[str]:
+    return db.inhire_tenants()
 
 
-def load_tenants(cursor) -> list[str]:
-    cursor.execute("SELECT slug FROM inhire_tenants ORDER BY slug")
-    return [row[0] for row in cursor.fetchall()]
-
-
-def remove_tenant(conn, cursor, slug: str) -> None:
+def remove_tenant(db: Store, slug: str) -> None:
     """Forget a subdomain InHire no longer recognizes."""
-    cursor.execute("DELETE FROM inhire_tenants WHERE slug = ?", (slug,))
-    conn.commit()
+    db.remove_inhire_tenant(slug)
 
 
-def discovery_due(cursor, every: timedelta, now: datetime | None = None) -> bool:
+def discovery_due(db: Store, every: timedelta, now: datetime | None = None) -> bool:
     """True when `every` has passed, or RETRY_AFTER when the last run found nothing."""
-    cursor.execute("SELECT last_run, found FROM inhire_discovery")
-    row = cursor.fetchone()
-    if not row:
+    last = db.inhire_discovery()
+    if last is None:
         return True
-    last_run, found = row
+    last_run, found = last
     wait = RETRY_AFTER if found == 0 else every
-    return (now or datetime.now()) - datetime.fromisoformat(last_run) >= wait
+    return (now or datetime.now(timezone.utc)) - last_run >= wait
 
 
-def discover(conn, cursor, *, queries: list[str], brave_api_key: str | None, every: timedelta,
+def discover(db: Store, *, queries: list[str], brave_api_key: str | None, every: timedelta,
              errors: list[str] | None = None) -> list[str]:
     """Search for new tenants when the last run is older than `every`; return all known ones.
 
     Problems worth telling the user about are appended to `errors`.
     """
     errors = [] if errors is None else errors
-    init_tables(cursor)
-    if not discovery_due(cursor, every):
-        return load_tenants(cursor)
+    if not discovery_due(db, every):
+        return load_tenants(db)
 
     print("\n🔎 INHIRE — procurando novas empresas...")
     found: set[str] = set()
@@ -152,21 +140,16 @@ def discover(conn, cursor, *, queries: list[str], brave_api_key: str | None, eve
         reasons = ", ".join(sorted(set(brave_errors)))
         errors.append(f"A Brave falhou em {len(brave_errors)} de {len(queries)} buscas ({reasons}).")
 
-    now = datetime.now().isoformat(timespec="seconds")
-    before = len(load_tenants(cursor))
-    cursor.executemany(
-        "INSERT OR IGNORE INTO inhire_tenants (slug, found_at) VALUES (?, ?)",
-        [(slug, now) for slug in sorted(found)],
-    )
+    now = datetime.now(timezone.utc)
+    before = len(load_tenants(db))
+    db.add_inhire_tenants(sorted(found), now)
     # Saved even when nothing was found, so a blocked source is retried after
     # RETRY_AFTER instead of on every run
-    cursor.execute("DELETE FROM inhire_discovery")
-    cursor.execute("INSERT INTO inhire_discovery (last_run, found) VALUES (?, ?)", (now, len(found)))
-    conn.commit()
+    db.set_inhire_discovery(now, len(found))
     if not found:
         errors.append("A busca não achou nenhuma empresa (o site de busca pode ter bloqueado o bot). "
                       "Nova tentativa amanhã.")
 
-    tenants = load_tenants(cursor)
+    tenants = load_tenants(db)
     print(f"   ✅ {len(tenants) - before} empresas novas ({len(tenants)} no total)")
     return tenants

@@ -10,7 +10,6 @@ from datetime import datetime
 
 import requests
 
-import sqlite_bridge
 from store import Source, Store
 
 try:
@@ -92,7 +91,7 @@ def build_message(filter_name: str, job: dict) -> str:
     )
 
 
-def search_jobs(db: Store, cursor=None, /, *, filters: list[dict], user_agent: str, send: Callable,
+def search_jobs(db: Store, *, filters: list[dict], user_agent: str, send: Callable,
                 check: Callable[[str, str], tuple[bool, str]], proxy: str | None = None,
                 errors: list[str] | None = None) -> None:
     """Run every filter and send the unseen jobs, up to MAX_PAGES pages each.
@@ -104,9 +103,6 @@ def search_jobs(db: Store, cursor=None, /, *, filters: list[dict], user_agent: s
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
     errors = [] if errors is None else errors
-    if cursor is not None:
-        # legacy SQLite call from main.py; goes away with sqlite_bridge
-        db, send = sqlite_bridge.bridge(db, cursor, send)
     headers = {
         "User-Agent": user_agent,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",

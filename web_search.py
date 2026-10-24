@@ -13,7 +13,6 @@ from urllib.parse import urlsplit
 
 import requests
 
-import sqlite_bridge
 from linkedin_posts import BRAVE_URL, MAX_OFFSET, REQUEST_INTERVAL, RESULTS_PER_PAGE, parse_page_age
 from store import Source, Store
 
@@ -99,7 +98,7 @@ def _word_pattern(terms: list[str]) -> re.Pattern:
     return re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
 
 
-def search_jobs(db: Store, cursor=None, /, *, api_key, filters, pages, excluded_sites, required_terms, ignored_companies, send,
+def search_jobs(db: Store, *, api_key, filters, pages, excluded_sites, required_terms, ignored_companies, send,
                 errors: list[str] | None = None, blocked_terms: list[str] = (), max_age_days: int = 1) -> None:
     """Run every filter and send the relevant, unseen pages.
 
@@ -111,9 +110,6 @@ def search_jobs(db: Store, cursor=None, /, *, api_key, filters, pages, excluded_
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
     errors = [] if errors is None else errors
-    if cursor is not None:
-        # legacy SQLite call from main.py; goes away with sqlite_bridge
-        db, send = sqlite_bridge.bridge(db, cursor, send)
     if not api_key:
         print("\n⚠️  Busca na web desativada: defina BRAVE_API_KEY no .env")
         return

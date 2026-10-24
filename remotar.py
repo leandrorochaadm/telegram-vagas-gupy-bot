@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 
 import requests
 
-import sqlite_bridge
 from store import Source, Store
 
 API_URL = "https://api.remotar.com.br/jobs"
@@ -102,7 +101,7 @@ def _skip_reason(job: dict, workplaces: list[str], ignore_foreign: bool,
     return reason if blocked else ""
 
 
-def search_jobs(db: Store, cursor=None, /, *, filters: list[dict], max_age_days: int, ignore_foreign: bool,
+def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, ignore_foreign: bool,
                 user_agent: str, send: Callable, check: Callable[[str, str], tuple[bool, str]],
                 errors: list[str] | None = None, now: datetime | None = None) -> None:
     """Run every filter and send the unseen jobs published in the last max_age_days.
@@ -115,9 +114,6 @@ def search_jobs(db: Store, cursor=None, /, *, filters: list[dict], max_age_days:
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
     errors = [] if errors is None else errors
-    if cursor is not None:
-        # legacy SQLite call from main.py; goes away with sqlite_bridge
-        db, send = sqlite_bridge.bridge(db, cursor, send)
     headers = {"User-Agent": user_agent, "Accept": "application/json"}
 
     for job_filter in filters:

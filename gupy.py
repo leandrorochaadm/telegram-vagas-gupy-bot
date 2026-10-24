@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 
 import requests
 
-import sqlite_bridge
 from store import Source, Store
 
 API_URL = "https://portal.gupy.io/api/job-search/jobs"
@@ -59,7 +58,7 @@ def build_message(filter_name: str, job: dict, published: datetime | None) -> st
     )
 
 
-def search_jobs(db: Store, cursor=None, /, *, filters: list[dict], max_age_days: int, user_agent: str,
+def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, user_agent: str,
                 send: Callable, check: Callable[[str, str], tuple[bool, str]],
                 errors: list[str] | None = None) -> None:
     """Run every filter and send the unseen jobs published in the last max_age_days.
@@ -70,9 +69,6 @@ def search_jobs(db: Store, cursor=None, /, *, filters: list[dict], max_age_days:
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
     errors = [] if errors is None else errors
-    if cursor is not None:
-        # legacy SQLite call from main.py; goes away with sqlite_bridge
-        db, send = sqlite_bridge.bridge(db, cursor, send)
     headers = {
         "User-Agent": user_agent,
         "Accept": "application/json, text/plain, */*",
