@@ -58,7 +58,8 @@ class PocketBaseServer:
         data_dir = os.path.join(self._root, "pb_data")
         os.makedirs(data_dir)
         self._log_path = os.path.join(self._root, "pocketbase.log")
-        password = secrets.token_urlsafe(24)
+        # Prefix: token_urlsafe can start with "-", which the CLI would parse as a flag.
+        password = "pw" + secrets.token_urlsafe(24)
         try:
             self._run([self._binary, "migrate", "up", f"--dir={data_dir}", f"--migrationsDir={self._migrations_dir}"])
             self._run([self._binary, "superuser", "upsert", SUPERUSER_EMAIL, password, f"--dir={data_dir}"])
