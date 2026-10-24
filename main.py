@@ -27,7 +27,7 @@ except ImportError:
     BS4_DISPONIVEL = False
     print("⚠️  beautifulsoup4 não instalado — LinkedIn desativado. Rode: pip install beautifulsoup4")
 
-AVISO_SEM_BS4 = "ProgramaThor e LinkedIn desligados: falta instalar o beautifulsoup4 (pip install beautifulsoup4)."
+AVISO_SEM_BS4 = "LinkedIn desligado: falta instalar o beautifulsoup4 (pip install beautifulsoup4)."
 
 # --- 1. CONFIG ---
 DIRETORIO_ATUAL = os.path.dirname(os.path.abspath(__file__))
@@ -1152,7 +1152,6 @@ def anotar_falhas_envio():
 # functions, so tests can patch them. Order = sequential order of a full run.
 SOURCES = {
     "gupy": ("buscar_vagas_gupy", "GUPY"),
-    "programathor": ("buscar_vagas_programathor", "PROGRAMATHOR"),
     "linkedin": ("buscar_vagas_linkedin", "LINKEDIN"),
     "linkedin_posts": ("buscar_posts_linkedin", "LINKEDIN PUBLICAÇÕES"),
     "inhire": ("buscar_vagas_inhire", "INHIRE"),
@@ -1163,7 +1162,7 @@ SOURCES = {
     "web": ("buscar_vagas_web", "WEB"),
 }
 # Sources that skip the scan without beautifulsoup4
-BS4_SOURCES = {"programathor", "linkedin"}
+BS4_SOURCES = {"linkedin"}
 
 # Tables only one source writes: its copy replaces them whole on merge,
 # so rows the source deleted (e.g. InHire tenants) are not brought back

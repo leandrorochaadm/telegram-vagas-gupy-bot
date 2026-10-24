@@ -1,7 +1,7 @@
 # 🤖 Multi-Source Job Tracker: Automação de Vagas para Devs no Telegram
 
 [![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![Sources](https://img.shields.io/badge/Fontes-Gupy%20%7C%20LinkedIn%20%7C%20ProgramaThor%20%7C%20Solides%20%7C%20InHire%20%7C%20Remotar-orange)]()
+[![Sources](https://img.shields.io/badge/Fontes-Gupy%20%7C%20LinkedIn%20%7C%20Solides%20%7C%20InHire%20%7C%20Remotar-orange)]()
 [![Telegram](https://img.shields.io/badge/Alertas-Telegram-2CA5E0)]()
 [![GitHub Actions](https://img.shields.io/badge/Automação-GitHub%20Actions-181717?logo=github)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -29,7 +29,7 @@ Bot que monitora vagas de emprego em múltiplas plataformas e envia alertas form
 ```
 GitHub Actions (agendado automaticamente)
     ↓
-Varre Gupy + LinkedIn + ProgramaThor + Solides + InHire + Remotar
+Varre Gupy + LinkedIn + Solides + InHire + Remotar
     ↓
 Aplica filtros de perfil (termo obrigatório no título, empresas ignoradas)
     ↓
@@ -46,7 +46,6 @@ Salva histórico no banco SQLite (evita reenvio de vagas já vistas)
 |---|---|
 | 🟣 **Gupy** | API JSON |
 | 🔷 **LinkedIn** | API Guest (sem login) |
-| 🟤 **ProgramaThor** | Web Scraping |
 | 🟢 **Solides** | Página pública (dados Next.js) |
 | 🟣 **InHire** | API JSON |
 | 🟠 **Remotar** | API JSON |
@@ -145,7 +144,7 @@ O código fica em `gupy.py`; o `main.py` só passa as configurações.
 
 ---
 
-#### `FILTROS_PROGRAMATHOR`
+#### `FILTROS_PROGRAMATHOR` (fonte desativada)
 
 ```python
 FILTROS_PROGRAMATHOR = [
@@ -391,7 +390,7 @@ Em um fork, sem o Worker, o bot roda só nos horários de reserva. Para ter o ag
 
 Cada site roda num job próprio, todos ao mesmo tempo. Se um site travar ou der erro, os outros seguem normalmente:
 
-1. **Um job por site** (Gupy, ProgramaThor, LinkedIn, publicações do LinkedIn, InHire, Sólides, Remotar e a busca na web), todos ao mesmo tempo. Cada job só **guarda** as vagas que acha numa fila do banco (tabela `vagas_pendentes`), sem enviar ao grupo. Cada um tem **15 min** contados do início (instalação incluída); quem passar disso é interrompido, mas as vagas que já guardou são enviadas.
+1. **Um job por site** (Gupy, LinkedIn, publicações do LinkedIn, InHire, Sólides, Remotar e a busca na web), todos ao mesmo tempo. Cada job só **guarda** as vagas que acha numa fila do banco (tabela `vagas_pendentes`), sem enviar ao grupo. Cada um tem **15 min** contados do início (instalação incluída); quem passar disso é interrompido, mas as vagas que já guardou são enviadas.
 2. **Envio, por último:** junta as cópias no `vagas_gupy.db`, **envia todas as vagas da fila** de uma vez, envia **um aviso só** com os problemas de todos e faz um único commit.
 
 Como o envio acontece num lugar só, a mesma vaga achada em dois sites chega uma vez só ao grupo (vale a mensagem do site dedicado, que vem antes da web). Vaga que o Telegram recusar fica na fila e é enviada na próxima execução.
@@ -422,13 +421,13 @@ Quando algo dá errado, o bot avisa no próprio grupo. Os problemas de todas as 
 
 O que entra no aviso:
 
-- **Busca recusada ou sem resposta** em qualquer fonte (Gupy, ProgramaThor, LinkedIn, InHire, Solides, Remotar, web). Ex.: página da Solides que mudou de formato. Quando o LinkedIn pede uma pausa (excesso de buscas), o bot tenta de novo até 3 vezes, com pausas crescentes (`PAUSAS_NOVA_TENTATIVA_LINKEDIN`: 10, 30 e 60 s, ou o tempo que o LinkedIn pedir, até 60 s) antes de avisar; a espera somada na execução não passa de `PAUSA_TOTAL_MAXIMA_LINKEDIN` segundos, e entre uma página e outra o bot espera `PAUSA_ENTRE_PAGINAS_LINKEDIN` segundos. Quando a página da Solides chega sem a lista de vagas (`initialData`), o bot espera `PAUSA_NOVA_TENTATIVA_SOLIDES` segundos e tenta de novo uma vez antes de avisar.
+- **Busca recusada ou sem resposta** em qualquer fonte (Gupy, LinkedIn, InHire, Solides, Remotar, web). Ex.: página da Solides que mudou de formato. Quando o LinkedIn pede uma pausa (excesso de buscas), o bot tenta de novo até 3 vezes, com pausas crescentes (`PAUSAS_NOVA_TENTATIVA_LINKEDIN`: 10, 30 e 60 s, ou o tempo que o LinkedIn pedir, até 60 s) antes de avisar; a espera somada na execução não passa de `PAUSA_TOTAL_MAXIMA_LINKEDIN` segundos, e entre uma página e outra o bot espera `PAUSA_ENTRE_PAGINAS_LINKEDIN` segundos. Quando a página da Solides chega sem a lista de vagas (`initialData`), o bot espera `PAUSA_NOVA_TENTATIVA_SOLIDES` segundos e tenta de novo uma vez antes de avisar.
 - **Cota da Brave esgotada** nas publicações do LinkedIn e na busca na web.
 - **Login do LinkedIn expirado** (`LINKEDIN_LI_AT`): avisa na hora e de novo a cada 24h, se a nova tentativa também falhar.
 - **Página de publicações do LinkedIn bloqueada ou diferente do esperado** (busca com login): quando o LinkedIn recusa a página ou ela não mostra nem publicações nem "nenhum resultado". Assim uma mudança no site não passa por "dia sem publicações".
 - **Erro inesperado**: a fonte para e as outras continuam rodando.
 - **Vagas que o Telegram não entregou**: não ficam marcadas como enviadas e voltam na próxima execução. Quando o Telegram pede para esperar (limite de 20 mensagens por minuto num grupo), o bot espera e tenta de novo; entre uma vaga e outra ele já espera `PAUSA_ENTRE_VAGAS` segundos.
-- **beautifulsoup4 não instalado**: ProgramaThor e LinkedIn ficam desligados.
+- **beautifulsoup4 não instalado**: O LinkedIn fica desligado.
 - **Banco de vagas que não abre**: nenhuma busca é feita e o aviso sai na hora.
 
 ```

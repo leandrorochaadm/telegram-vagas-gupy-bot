@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        source: [gupy, programathor, linkedin, linkedin_posts, inhire, solides, remotar, web]
+        source: [gupy, linkedin, linkedin_posts, inhire, solides, remotar, web]
     env:
       HAS_LINKEDIN_LI_AT: ${{ secrets.LINKEDIN_LI_AT != '' }}
 
