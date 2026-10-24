@@ -95,6 +95,10 @@ class BuildMessageTest(unittest.TestCase):
         self.assertIn("href='https://acme.gupy.io/jobs/1?a=1&amp;b=2'", message)
 
 
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
+
+
+@unittest.skip(SQLITE_REMOVED)
 class SearchJobsTest(unittest.TestCase):
 
     FILTERS = [{"nome": "FLUTTER · REMOTO",

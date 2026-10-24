@@ -142,6 +142,10 @@ class SearchWebTest(unittest.TestCase):
         self.assertEqual(errors, ["código 429"])
 
 
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
+
+
+@unittest.skip(SQLITE_REMOVED)
 class SearchJobsTest(unittest.TestCase):
 
     def setUp(self):
@@ -232,6 +236,7 @@ class SearchJobsTest(unittest.TestCase):
 class MainWiringTest(unittest.TestCase):
     """main.py only passes settings; check it passes the web ones."""
 
+    @unittest.skip(SQLITE_REMOVED)
     def test_passes_web_settings(self):
         with mock.patch.object(main.web_search, "search_jobs") as search_jobs, \
              mock.patch.object(main, "anotar_avisos"), \
@@ -297,6 +302,24 @@ class SearchJobsWithStoreTest(unittest.TestCase):
     def test_without_api_key_does_not_query_the_store(self):
         self.run_with(db=FakeStore(fail_with=StoreError()), api_key="")
         self.send.assert_not_called()
+
+
+class MainWiringStoreTest(unittest.TestCase):
+    """Same wiring check as MainWiringTest, with the store instead of the connection."""
+
+    def test_passes_web_settings(self):
+        db = FakeStore()
+        with mock.patch.object(main.web_search, "search_jobs") as search_jobs, \
+             mock.patch.object(main, "anotar_avisos"), \
+             mock.patch.object(main, "brave_due", return_value=True):
+            main.buscar_vagas_web(db)
+        self.assertIs(search_jobs.call_args.args[0], db)
+        kwargs = search_jobs.call_args.kwargs
+        self.assertIs(kwargs["required_terms"], main.TERMOS_OBRIGATORIOS_WEB)
+        self.assertIs(kwargs["filters"], main.FILTROS_WEB)
+        self.assertIs(kwargs["excluded_sites"], main.SITES_EXCLUIDOS_WEB)
+        self.assertIs(kwargs["blocked_terms"], main.TERMOS_BLOQUEADOS_WEB)
+        self.assertEqual(kwargs["max_age_days"], main.DIAS_WEB)
 
 
 if __name__ == "__main__":

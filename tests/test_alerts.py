@@ -11,7 +11,13 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import main  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Collection, Source, StoreError  # noqa: E402
+
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
 
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
 
@@ -82,6 +88,7 @@ class EnviarTelegramTest(unittest.TestCase):
         self.assertFalse(result)
 
 
+@unittest.skip(SQLITE_REMOVED)
 class RegistrarEEnviarTest(AlertTestCase):
     def send(self, link="https://x/1", title="Dev Flutter"):
         main.registrar_e_enviar(self.conn, self.cursor, link, title, "Acme", "29/09/2026", "msg", "GUPY")
@@ -124,6 +131,7 @@ class RegistrarEEnviarTest(AlertTestCase):
         self.assertIn("Dev Flutter &lt;Pleno&gt; (GUPY)", alert)
 
 
+@unittest.skip(SQLITE_REMOVED)
 class EnviarAvisosTest(AlertTestCase):
     def test_every_source_goes_in_one_message(self):
         main.anotar_avisos("GUPY", ["FLUTTER: a Gupy recusou a busca (403)."])
@@ -191,6 +199,7 @@ class EnviarAvisosTest(AlertTestCase):
         self.assertRegex(alert, r"… e mais \d+ problemas\.$")
 
 
+@unittest.skip(SQLITE_REMOVED)
 class SourceErrorsTest(AlertTestCase):
     def test_gupy_http_error_is_noted(self):
         with mock.patch.object(main, "FILTROS_GUPY", [{"nome": "FLUTTER", "params": {}}]), \
@@ -268,6 +277,7 @@ class SourceErrorsTest(AlertTestCase):
         self.assertIn("A varredura parou no meio por um erro inesperado", main._avisos[0][1])
 
 
+@unittest.skip(SQLITE_REMOVED)
 class MainTest(AlertTestCase):
     def run_main(self, **patches):
         sources = ["buscar_vagas_gupy", "buscar_vagas_programathor", "buscar_vagas_linkedin",
@@ -294,6 +304,306 @@ class MainTest(AlertTestCase):
         self.run_main(BS4_DISPONIVEL=False, iniciar_banco=mock.Mock(return_value=(self.conn, self.cursor)),
                       enviar_avisos=mock.DEFAULT)
         self.assertEqual(main._avisos, [("BOT", main.AVISO_SEM_BS4)])
+
+
+class StoreAlertTestCase(unittest.TestCase):
+    def setUp(self):
+        self.db = FakeStore()
+        for state in (main._enviados_sessao, main._falhas_envio, main._avisos):
+            state.clear()
+            self.addCleanup(state.clear)
+        patches = [
+            mock.patch.object(main, "enviar_telegram", return_value=True),
+            mock.patch.object(main.time, "sleep"),
+        ]
+        self.telegram, self.sleep = [p.start() for p in patches]
+        for p in patches:
+            self.addCleanup(p.stop)
+
+    def flush(self, now=None):
+        self.telegram.reset_mock()
+        main.enviar_avisos(self.db, agora=now)
+
+    def pending(self):
+        return [(a.label, a.text) for a in self.db.pending_alerts()]
+
+
+class RegistrarEEnviarStoreTest(StoreAlertTestCase):
+    def send(self, link="https://x/1", title="Dev Flutter"):
+        main.registrar_e_enviar(self.db, link, title, "Acme", "29/09/2026", "msg", Source.GUPY)
+
+    def test_delivered_job_is_saved(self):
+        self.send()
+        self.assertEqual(list(self.db.sent), ["https://x/1"])
+        self.sleep.assert_called_once_with(main.PAUSA_ENTRE_VAGAS)
+
+    def test_same_job_from_another_source_is_not_sent_on_the_next_run(self):
+        self.send("https://gupy/1")
+        self.send("https://linkedin/1")  # same title and company, other source
+        self.assertEqual(self.telegram.call_count, 1)
+        self.assertCountEqual(self.db.sent, ["https://gupy/1", "https://linkedin/1"])
+
+        main._enviados_sessao.clear()  # next run
+        for link in ("https://gupy/1", "https://linkedin/1"):
+            if not self.db.is_sent(link):
+                self.send(link)
+        self.assertEqual(self.telegram.call_count, 1)
+
+    def test_refused_job_is_not_saved_so_next_run_retries(self):
+        self.telegram.return_value = False
+        self.send()
+        self.assertEqual(list(self.db.sent), [])
+        self.assertEqual(main._falhas_envio, ["Dev Flutter (GUPY)"])
+
+    def test_refused_jobs_go_into_the_alert(self):
+        self.telegram.return_value = False
+        self.send("https://x/1", "Dev Flutter <Pleno>")
+        self.send("https://x/2", "Dev Flutter Sênior")
+        main.anotar_falhas_envio()
+        self.telegram.return_value = True
+        self.flush()
+        alert = self.telegram.call_args.args[0]
+        self.assertIn("2 vagas não chegaram ao grupo", alert)
+        self.assertIn("Dev Flutter &lt;Pleno&gt; (GUPY)", alert)
+
+    def test_delivered_job_survives_a_store_failure_on_save(self):
+        self.db.fail_with = StoreError("down")
+        self.send()
+        self.assertEqual(self.telegram.call_count, 1)
+        self.assertEqual([source for source, _ in main._avisos], [Source.BOT])
+
+    def test_duplicate_not_saved_is_noted(self):
+        self.send("https://gupy/1")
+        self.db.fail_with = StoreError("down")
+        self.send("https://linkedin/1")
+        self.assertEqual(self.telegram.call_count, 1)
+        self.assertEqual([source for source, _ in main._avisos], [Source.BOT])
+
+    def test_queued_run_stores_the_job_instead_of_sending(self):
+        with mock.patch.object(main, "_queue_jobs", True):
+            self.send()
+        self.telegram.assert_not_called()
+        self.assertEqual(self.db.count(Collection.QUEUED_JOBS), 1)
+        self.assertEqual(self.db.queued_jobs()[0].source, Source.GUPY)
+
+    def test_send_queued_jobs_sends_and_clears_the_queue(self):
+        with mock.patch.object(main, "_queue_jobs", True):
+            self.send("https://x/1", "Dev Flutter")
+        main.send_queued_jobs(self.db)
+        self.assertEqual(self.telegram.call_count, 1)
+        self.assertEqual(self.db.count(Collection.QUEUED_JOBS), 0)
+        self.assertEqual(list(self.db.sent), ["https://x/1"])
+
+    def test_refused_queued_job_stays_queued(self):
+        with mock.patch.object(main, "_queue_jobs", True):
+            self.send()
+        self.telegram.return_value = False
+        main.send_queued_jobs(self.db)
+        self.assertEqual(self.db.count(Collection.QUEUED_JOBS), 1)
+
+
+class EnviarAvisosStoreTest(StoreAlertTestCase):
+    def test_every_source_goes_in_one_message(self):
+        main.anotar_avisos(Source.GUPY, ["FLUTTER: a Gupy recusou a busca (403)."])
+        main.anotar_avisos(Source.WEB, ["FLUTTER: a Brave não respondeu."])
+        self.flush()
+        self.telegram.assert_called_once()
+        alert = self.telegram.call_args.args[0]
+        self.assertIn("<b>GUPY</b>\n• FLUTTER: a Gupy recusou a busca (403).", alert)
+        self.assertIn("<b>WEB</b>\n• FLUTTER: a Brave não respondeu.", alert)
+        self.assertEqual(self.pending(), [])
+
+    def test_nothing_is_sent_without_problems(self):
+        self.flush()
+        self.telegram.assert_not_called()
+
+    def test_waits_the_interval_and_sends_everything_together(self):
+        main.anotar_avisos(Source.GUPY, ["erro 1"])
+        self.flush(NOW)
+        main.anotar_avisos(Source.LINKEDIN, ["erro 2"])
+        self.flush(NOW + timedelta(minutes=main.INTERVALO_AVISOS_MIN - 1))
+        self.telegram.assert_not_called()
+        self.assertEqual(self.pending(), [(Source.LINKEDIN.api_value, "erro 2")])
+
+        main.anotar_avisos(Source.WEB, ["erro 3"])
+        self.flush(NOW + timedelta(minutes=main.INTERVALO_AVISOS_MIN))
+        alert = self.telegram.call_args.args[0]
+        self.assertIn("erro 2", alert)
+        self.assertIn("erro 3", alert)
+        self.assertEqual(self.pending(), [])
+
+    def test_failed_alert_is_kept_for_the_next_one(self):
+        self.telegram.return_value = False
+        main.anotar_avisos(Source.GUPY, ["erro 1"])
+        self.flush(NOW)
+        self.assertEqual(self.pending(), [(Source.GUPY.api_value, "erro 1")])
+        self.telegram.return_value = True
+        self.flush(NOW + timedelta(minutes=1))  # nothing was sent, so no interval to wait
+        self.assertIn("erro 1", self.telegram.call_args.args[0])
+
+    def test_interval_is_measured_in_utc(self):
+        main.anotar_avisos(Source.GUPY, ["erro 1"])
+        self.flush()  # real clock, as in a run
+        self.assertEqual(self.db.last_alert_at().utcoffset(), timedelta(0))
+
+    def test_problems_stay_in_memory_when_the_database_fails(self):
+        main.anotar_avisos(Source.GUPY, ["erro 1"])
+        self.db.fail_with = StoreError("database is down")
+        with self.assertRaises(StoreError):
+            main.enviar_avisos(self.db, agora=NOW)
+        self.assertEqual(main._avisos, [(Source.GUPY, "erro 1")])
+
+    def test_repeated_problem_is_counted_not_repeated(self):
+        main.anotar_avisos(Source.LINKEDIN, ["recusou (429)."] * 3)
+        self.flush()
+        alert = self.telegram.call_args.args[0]
+        self.assertEqual(alert.count("recusou (429)."), 1)
+        self.assertIn("recusou (429). (3x)", alert)
+
+    def test_long_alert_is_cut_before_telegram_limit(self):
+        main.anotar_avisos(Source.INHIRE, [f"empresa {i} " + "x" * 100 for i in range(100)])
+        self.flush()
+        alert = self.telegram.call_args.args[0]
+        self.assertLessEqual(len(alert), main.TAMANHO_MAX_AVISO + 50)
+        self.assertRegex(alert, r"… e mais \d+ problemas\.$")
+
+    def test_unknown_source_label_becomes_a_generic_source(self):
+        self.db.add_alerts([("not_a_source", "erro 1")])
+        self.flush()
+        self.assertIn("FONTE DESCONHECIDA", self.telegram.call_args.args[0])
+
+    def test_only_the_alerts_that_were_sent_are_deleted(self):
+        main.anotar_avisos(Source.GUPY, ["erro 1"])
+
+        def send_and_save_more(message):
+            self.db.add_alerts([(Source.WEB.api_value, "erro novo")])
+            return True
+        self.telegram.side_effect = send_and_save_more
+        self.flush(NOW)
+        self.assertEqual(self.pending(), [(Source.WEB.api_value, "erro novo")])
+
+
+class SourceErrorsStoreTest(StoreAlertTestCase):
+    def test_gupy_http_error_is_noted(self):
+        with mock.patch.object(main, "FILTROS_GUPY", [{"nome": "FLUTTER", "params": {}}]), \
+             mock.patch.object(main.requests, "get", return_value=response(403)):
+            main.buscar_vagas_gupy(self.db)
+        self.assertEqual(main._avisos, [(Source.GUPY, "FLUTTER: a Gupy recusou a busca (403).")])
+
+    def test_network_error_is_noted_as_no_answer(self):
+        with mock.patch.object(main, "FILTROS_GUPY", [{"nome": "FLUTTER", "params": {}}]), \
+             mock.patch.object(main.requests, "get", side_effect=main.requests.Timeout("slow")):
+            main.buscar_vagas_gupy(self.db)
+        self.assertEqual(main._avisos, [(Source.GUPY, "FLUTTER: o site não respondeu.")])
+
+    def test_gupy_title_is_escaped(self):
+        vaga = {"jobUrl": "https://acme.gupy.io/jobs/1?a=1&b=2", "name": "Dev Flutter <Pleno> & Mobile",
+                "careerPageName": "Acme", "publishedDate": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")}
+        with mock.patch.object(main, "FILTROS_GUPY", [{"nome": "FLUTTER", "params": {}}]), \
+             mock.patch.object(main.requests, "get",
+                               side_effect=[response(json_data={"data": [vaga]}), response(json_data={"data": []})]):
+            main.buscar_vagas_gupy(self.db)
+        message = self.telegram.call_args.args[0]
+        self.assertIn("Dev Flutter &lt;Pleno&gt; &amp; Mobile", message)
+        self.assertIn("href='https://acme.gupy.io/jobs/1?a=1&amp;b=2'", message)
+
+    def test_gupy_pages_advance_by_the_configured_limit(self):
+        now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        page = lambda n: response(json_data={"data": [
+            {"jobUrl": f"https://acme.gupy.io/jobs/{n}", "name": f"Dev Flutter {n}", "careerPageName": "Acme",
+             "publishedDate": now}]})
+        with mock.patch.object(main, "FILTROS_GUPY", [{"nome": "FLUTTER", "params": {"limit": 15}}]), \
+             mock.patch.object(main.requests, "get",
+                               side_effect=[page(1), page(2), response(json_data={"data": []})]) as get:
+            main.buscar_vagas_gupy(self.db)
+        offsets = [call.kwargs["params"]["offset"] for call in get.call_args_list]
+        self.assertEqual(offsets, [0, 15, 30])
+
+    def test_linkedin_retries_with_growing_pauses_until_allowed(self):
+        with mock.patch.object(main, "FILTROS_LINKEDIN", [{"nome": "FLUTTER", "params": {}}]), \
+             mock.patch.object(main, "PAGINAS_LINKEDIN", 1), \
+             mock.patch.object(main.requests, "get", side_effect=[response(429), response(200)]) as get:
+            main.buscar_vagas_linkedin(self.db)
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(self.sleep.call_args_list, [mock.call(main.PAUSAS_NOVA_TENTATIVA_LINKEDIN[0])])
+        self.assertEqual(main._avisos, [])
+
+    def test_linkedin_still_limited_after_retry_is_noted(self):
+        with mock.patch.object(main, "FILTROS_LINKEDIN", [{"nome": "FLUTTER", "params": {}}]), \
+             mock.patch.object(main.requests, "get", return_value=response(429)) as get:
+            main.buscar_vagas_linkedin(self.db)
+        self.assertEqual(get.call_count, 1 + len(main.PAUSAS_NOVA_TENTATIVA_LINKEDIN))
+        self.assertEqual(self.sleep.call_args_list, [mock.call(p) for p in main.PAUSAS_NOVA_TENTATIVA_LINKEDIN])
+        self.assertEqual(main._avisos, [(Source.LINKEDIN, "FLUTTER: o LinkedIn recusou a busca (429).")])
+
+    def test_linkedin_posts_brave_refusal_is_noted(self):
+        def refuse(api_key, query, pages, errors):
+            errors.append("código 429")
+            return []
+        with mock.patch.object(main, "BRAVE_API_KEY", "key"), \
+             mock.patch.object(main, "LINKEDIN_LI_AT", None), \
+             mock.patch.object(main, "FILTROS_POSTS_LINKEDIN", [{"nome": "POSTS", "termo": "flutter"}]), \
+             mock.patch.object(main.linkedin_posts, "search_posts", side_effect=refuse):
+            main.buscar_posts_linkedin(self.db)
+        self.assertEqual(main._avisos, [(Source.LINKEDIN_POSTS, "POSTS: a Brave recusou a busca (código 429).")])
+
+    def test_web_errors_are_noted(self):
+        def fail(db, **kw):
+            kw["errors"].append("FLUTTER: a Brave não respondeu.")
+        with mock.patch.object(main.web_search, "search_jobs", side_effect=fail):
+            main.buscar_vagas_web(self.db)
+        self.assertEqual(main._avisos, [(Source.WEB, "FLUTTER: a Brave não respondeu.")])
+
+    def test_unexpected_error_is_noted_and_does_not_raise(self):
+        with mock.patch.object(main, "FILTROS_GUPY", None):
+            main.buscar_vagas_gupy(self.db)
+        self.assertIn("A varredura parou no meio por um erro inesperado", main._avisos[0][1])
+
+
+class MainStoreTest(StoreAlertTestCase):
+    def run_main(self, argv=(), **patches):
+        sources = {name: mock.DEFAULT for name in main.SOURCE_FUNCTIONS.values()}
+        sources.update(patches)
+        with mock.patch.multiple(main, TOKEN="t", CHAT_ID="c", **sources) as mocks:
+            main.main(argv)
+        return mocks
+
+    def test_database_error_is_alerted_directly_and_stops_the_run(self):
+        self.db.fail_with = StoreError("PocketBase is down")
+        with mock.patch.object(main, "from_env", return_value=self.db):
+            mocks = self.run_main()
+        mocks["buscar_vagas_gupy"].assert_not_called()
+        self.assertIn("PocketBase is down", self.telegram.call_args.args[0])
+
+    def test_missing_settings_stop_the_run(self):
+        with mock.patch.object(main, "from_env", side_effect=StoreError("no URL")):
+            self.run_main()
+        self.assertIn("no URL", self.telegram.call_args.args[0])
+
+    def test_alert_storage_error_sends_this_run_problems_directly(self):
+        main.anotar_avisos(Source.GUPY, ["erro 1"])
+        self.db.fail_with = None
+        with mock.patch.object(main, "from_env", return_value=self.db):
+            self.run_main(enviar_avisos=mock.Mock(side_effect=StoreError("database is locked")))
+        alert = self.telegram.call_args.args[0]
+        self.assertIn("erro 1", alert)
+        self.assertIn("database is locked", alert)
+
+    def test_missing_beautifulsoup_is_alerted_once(self):
+        with mock.patch.object(main, "from_env", return_value=self.db):
+            self.run_main(BS4_DISPONIVEL=False, enviar_avisos=mock.DEFAULT)
+        self.assertEqual(main._avisos, [(Source.BOT, main.AVISO_SEM_BS4)])
+
+    def test_connect_is_called_before_the_scan(self):
+        with mock.patch.object(main, "from_env", return_value=self.db):
+            self.run_main(["--send-alerts"])
+        self.assertTrue(self.db.connected)
+
+    def test_queue_failure_is_noted_and_the_run_goes_on(self):
+        with mock.patch.object(main, "from_env", return_value=self.db), \
+             mock.patch.object(main, "send_queued_jobs", side_effect=StoreError("down")):
+            self.run_main(["--send-jobs"])
+        self.assertEqual([a.label for a in self.db.pending_alerts()], [Source.BOT.api_value])
 
 
 if __name__ == "__main__":

@@ -90,6 +90,10 @@ class BuildMessageTest(unittest.TestCase):
         self.assertIn("📅 <b>Publicada em:</b> 25/09/2026", message)
 
 
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
+
+
+@unittest.skip(SQLITE_REMOVED)
 class SearchJobsTest(unittest.TestCase):
 
     FILTERS = [{"nome": "FLUTTER · REMOTO", "termo": "flutter", "modalidades": ["remote"]}]

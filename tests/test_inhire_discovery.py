@@ -7,11 +7,17 @@ import sqlite3
 import sys
 import unittest
 from datetime import datetime, timedelta
+from datetime import timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import inhire_discovery  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Collection, StoreError  # noqa: E402
+
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
 
 WEEK = timedelta(days=7)
 
@@ -108,6 +114,7 @@ def yahoo_ok(*tenants):
     return set(tenants), True
 
 
+@unittest.skip(SQLITE_REMOVED)
 class DiscoverTest(unittest.TestCase):
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
@@ -186,6 +193,110 @@ class DiscoverTest(unittest.TestCase):
             self.discover(queries=["q1"])
         inhire_discovery.remove_tenant(self.conn, self.cursor, "acme")
         self.assertEqual(inhire_discovery.load_tenants(self.cursor), ["beta"])
+
+
+class DiscoverStoreTest(unittest.TestCase):
+    def setUp(self):
+        self.db = FakeStore()
+
+    def discover(self, brave_api_key=None, queries=("q1", "q2"), errors=None):
+        return inhire_discovery.discover(
+            self.db, queries=list(queries), brave_api_key=brave_api_key, every=WEEK,
+            errors=errors,
+        )
+
+    def age_last_run(self, delta):
+        _, found = self.db.inhire_discovery()
+        self.db.set_inhire_discovery(datetime.now(timezone.utc) - delta, found)
+
+    def test_saves_tenants_from_every_query(self):
+        with mock.patch.object(inhire_discovery, "search_yahoo",
+                               side_effect=[yahoo_ok("acme"), yahoo_ok("beta", "acme")]):
+            self.assertEqual(self.discover(), ["acme", "beta"])
+
+    def test_uses_brave_only_with_api_key(self):
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok()), \
+                mock.patch.object(inhire_discovery, "search_brave", return_value=({"gamma"}, None)) as brave:
+            self.discover(queries=["q1"])
+            brave.assert_not_called()
+            self.age_last_run(inhire_discovery.RETRY_AFTER)
+            self.assertEqual(self.discover(brave_api_key="key", queries=["q1"]), ["gamma"])
+            brave.assert_called_once_with("key", "q1")
+
+    def test_skips_search_until_interval_passes(self):
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("acme")) as yahoo:
+            self.discover()
+            yahoo.reset_mock()
+            self.assertEqual(self.discover(), ["acme"])
+            yahoo.assert_not_called()
+
+    def test_keeps_old_tenants_on_new_run(self):
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("acme")):
+            self.discover()
+        self.age_last_run(WEEK)
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("beta")):
+            self.assertEqual(self.discover(), ["acme", "beta"])
+
+    def test_retries_after_a_day_when_nothing_found(self):
+        errors = []
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok()):
+            self.discover(errors=errors)
+        self.assertEqual(len(errors), 1)
+        self.assertFalse(inhire_discovery.discovery_due(self.db, WEEK))
+        self.age_last_run(inhire_discovery.RETRY_AFTER)
+        self.assertTrue(inhire_discovery.discovery_due(self.db, WEEK))
+
+    def test_failed_queries_become_one_line_per_source(self):
+        errors = []
+        with mock.patch.object(inhire_discovery, "search_yahoo",
+                               side_effect=[(set(), False), (set(), False), yahoo_ok("acme")]), \
+                mock.patch.object(inhire_discovery, "search_brave",
+                                  side_effect=[(set(), "código 429"), (set(), "código 429"), (set(), None)]):
+            self.assertEqual(self.discover(brave_api_key="key", queries=["q1", "q2", "q3"], errors=errors), ["acme"])
+        self.assertEqual(errors, [
+            "O Yahoo não respondeu a 2 de 3 buscas.",
+            "A Brave falhou em 2 de 3 buscas (código 429).",
+        ])
+
+    def test_remove_tenant(self):
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("acme", "beta")):
+            self.discover(queries=["q1"])
+        inhire_discovery.remove_tenant(self.db, "acme")
+        self.assertEqual(inhire_discovery.load_tenants(self.db), ["beta"])
+
+    def test_row_without_found_waits_the_full_interval(self):
+        now = datetime.now(timezone.utc)
+        with mock.patch.object(self.db, "inhire_discovery", return_value=(now - timedelta(days=2), None)):
+            self.assertFalse(inhire_discovery.discovery_due(self.db, WEEK, now=now))
+        with mock.patch.object(self.db, "inhire_discovery", return_value=(now - WEEK, None)):
+            self.assertTrue(inhire_discovery.discovery_due(self.db, WEEK, now=now))
+
+    def test_interval_limit_is_due(self):
+        last_run = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        self.db.set_inhire_discovery(last_run, 3)
+        self.assertTrue(inhire_discovery.discovery_due(self.db, WEEK, now=last_run + WEEK))
+        self.assertFalse(inhire_discovery.discovery_due(self.db, WEEK,
+                                                        now=last_run + WEEK - timedelta(seconds=1)))
+
+    def test_run_and_tenants_are_saved_in_utc(self):
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("acme")), \
+                mock.patch.object(self.db, "add_inhire_tenants", wraps=self.db.add_inhire_tenants) as add:
+            self.discover(queries=["q1"])
+        found_at = add.call_args.args[1]
+        self.assertEqual(found_at.utcoffset(), timedelta(0))
+        self.assertEqual(self.db.inhire_discovery()[0].utcoffset(), timedelta(0))
+
+    def test_saving_twice_keeps_one_discovery_row(self):
+        with mock.patch.object(inhire_discovery, "search_yahoo", return_value=yahoo_ok("acme")):
+            self.discover()
+            self.age_last_run(WEEK)
+            self.discover()
+        self.assertEqual(self.db.count(Collection.INHIRE_DISCOVERIES), 1)
+
+    def test_database_failure_raises(self):
+        db = FakeStore(fail_with=StoreError())
+        with self.assertRaises(StoreError):
+            inhire_discovery.discover(db, queries=["q1"], brave_api_key=None, every=WEEK)
 
 
 if __name__ == "__main__":
