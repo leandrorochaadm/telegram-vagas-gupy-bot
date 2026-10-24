@@ -2,6 +2,7 @@
 
 Run: python -m unittest discover -s tests -v
 """
+import io
 import os
 import shutil
 import sqlite3
@@ -13,6 +14,8 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import main  # noqa: E402
+
+DB_COPIES_REMOVED = "db copies and --merge were removed: every job writes to the central database"
 
 SCHEMA = [
     "CREATE TABLE vagas_enviadas (link TEXT PRIMARY KEY, data_publicacao TEXT, titulo TEXT)",
@@ -77,6 +80,7 @@ class ParallelTestCase(unittest.TestCase):
         conn.close()
 
 
+@unittest.skip(DB_COPIES_REMOVED)
 class MergeDatabasesTest(ParallelTestCase):
     def test_sent_jobs_from_every_copy_are_kept_once(self):
         gupy = self.copy_of_base("gupy", ["INSERT INTO vagas_enviadas VALUES ('https://b', '02/10', 'B')"])
@@ -205,6 +209,7 @@ class MainModesTest(ParallelTestCase):
         self.assertIn(("LINKEDIN PUBLICAÇÕES", main.AVISO_FONTE_INTERROMPIDA),
                       self.rows("SELECT fonte, texto FROM avisos_pendentes"))
 
+    @unittest.skip(DB_COPIES_REMOVED)
     def test_merge_alerts_sources_without_a_copy(self):
         self.copy_of_base("gupy", ["INSERT INTO vagas_enviadas VALUES ('https://b', '02/10', 'B')"])
         _, send, _ = self.run_main("--merge", os.path.join(self.dir.name, "copias"))
@@ -255,6 +260,7 @@ class JobQueueTest(MainModesTest):
         self.assertEqual(self.rows("SELECT link, mensagem FROM vagas_pendentes"), [("https://b", "msg")])
         self.assertNotIn(("https://b",), self.rows("SELECT link FROM vagas_enviadas"))
 
+    @unittest.skip(DB_COPIES_REMOVED)
     def test_merge_brings_the_queued_jobs_of_every_copy_dedicated_sites_first(self):
         self.write(self.base, [QUEUE_TABLE, queued("https://old", "Antiga")])
         self.copy_of_base("web", [queued("https://c", "C web", source="WEB"),
@@ -333,6 +339,39 @@ class JobQueueTest(MainModesTest):
         _, _, telegram = self.run_main()
         telegram.assert_called_once_with("msg https://b")
         self.assertEqual(self.rows("SELECT link FROM vagas_pendentes"), [])
+
+
+class NoDbCopiesTest(ParallelTestCase):
+    def test_merge_option_is_gone(self):
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+            main.parse_args(["--merge", "copias"])
+
+    def test_copy_merge_helpers_are_gone(self):
+        for name in ("merge_databases", "_merge_copy", "find_copies", "OWNED_TABLES", "SKIPPED_TABLES",
+                     "AVISO_FONTE_SEM_BANCO", "AVISO_COPIA_ESTRAGADA"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(main, name))
+
+    def test_parallel_steps_store_alerts_and_send_alerts_sends(self):
+        cases = [(["--source", "gupy"], True), (["--failed", "gupy"], True), (["--send-jobs"], True),
+                 (["--send-alerts"], False)]
+        names = [name for name, _ in main.SOURCES.values()]
+        for argv, stores in cases:
+            with self.subTest(argv=argv):
+                conn = sqlite3.connect(self.base)
+                self.addCleanup(conn.close)
+                with mock.patch.multiple(main, TOKEN="t", CHAT_ID="c", **{n: mock.DEFAULT for n in names}), \
+                     mock.patch.object(main, "iniciar_banco", return_value=(conn, conn.cursor())), \
+                     mock.patch.object(main, "store_alerts") as store, \
+                     mock.patch.object(main, "enviar_avisos") as send, \
+                     mock.patch.object(main, "enviar_telegram", return_value=True):
+                    main.main(argv)
+                if stores:
+                    store.assert_called_once()
+                    send.assert_not_called()
+                else:
+                    send.assert_called_once()
+                    store.assert_not_called()
 
 
 if __name__ == "__main__":

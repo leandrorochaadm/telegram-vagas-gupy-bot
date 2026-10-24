@@ -1157,95 +1157,19 @@ SOURCES = {
     "inhire": ("buscar_vagas_inhire", "INHIRE"),
     "solides": ("buscar_vagas_solides", "SOLIDES"),
     "remotar": ("buscar_vagas_remotar", "REMOTAR"),
-    # Last: dedicated sources send richer messages for the same links. Its copy is
-    # merged last too, so a link a dedicated source also queued keeps that message.
+    # Last: dedicated sources send richer messages for the same links.
     "web": ("buscar_vagas_web", "WEB"),
 }
 # Sources that skip the scan without beautifulsoup4
 BS4_SOURCES = {"linkedin"}
 
-# Tables only one source writes: its copy replaces them whole on merge,
-# so rows the source deleted (e.g. InHire tenants) are not brought back
-OWNED_TABLES = {
-    "inhire_tenants": "inhire",
-    "inhire_discovery": "inhire",
-    "linkedin_session": "linkedin_posts",
-}
-# Only the alert step writes it
-SKIPPED_TABLES = {"avisos_enviados"}
-
 AVISO_FONTE_INTERROMPIDA = "A busca parou antes do fim (travou ou deu erro). Os outros sites não foram afetados."
-AVISO_FONTE_SEM_BANCO = "O resultado desta busca se perdeu antes do fim. Ela roda de novo na próxima vez. Os outros sites não foram afetados."
-AVISO_COPIA_ESTRAGADA = ("Não foi possível juntar o que este site salvou. "
-                         "As vagas dele podem chegar repetidas na próxima execução.")
-
-def merge_databases(conn, cursor, copies):
-    """Bring into the main database what each parallel job saved in its copy.
-
-    `copies` maps source name -> path of its copy. Every copy started from
-    this same database, so rows it already has are skipped.
-    """
-    cursor.execute("CREATE TABLE IF NOT EXISTS avisos_pendentes (fonte TEXT, texto TEXT)")
-    # Alerts already pending before the jobs ran are in every copy too: take only the new ones
-    pending_before = cursor.execute("SELECT COALESCE(MAX(rowid), 0) FROM avisos_pendentes").fetchone()[0]
-    for source, path in copies.items():
-        attached = False
-        try:
-            cursor.execute("ATTACH DATABASE ? AS copy", (path,))
-            attached = True
-            _merge_copy(cursor, source, pending_before)
-            conn.commit()
-        except sqlite3.DatabaseError as e:
-            # A broken copy (e.g. job killed mid-write) loses only this source's records
-            conn.rollback()
-            print(f"❌ Cópia do banco de {source} não foi juntada: {e}")
-            anotar_avisos(SOURCES[source][1], [AVISO_COPIA_ESTRAGADA])
-        finally:
-            if attached:
-                cursor.execute("DETACH DATABASE copy")
-
-def _merge_copy(cursor, source, pending_before):
-    """Merge the attached `copy` database of job `source` into main."""
-    tables = cursor.execute(
-        "SELECT name, sql FROM copy.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-    ).fetchall()
-    for table, create_sql in tables:
-        if table in SKIPPED_TABLES or (table in OWNED_TABLES and OWNED_TABLES[table] != source):
-            continue
-        cursor.execute(create_sql.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
-        cols = ", ".join(f'"{row[1]}"' for row in cursor.execute(f'PRAGMA copy.table_info("{table}")'))
-        select = f'SELECT {cols} FROM copy."{table}"'
-        if table in OWNED_TABLES:
-            cursor.execute(f'DELETE FROM main."{table}"')
-            cursor.execute(f'INSERT INTO main."{table}" ({cols}) {select}')
-        elif table == "avisos_pendentes":
-            cursor.execute(f'INSERT INTO main."{table}" ({cols}) {select} WHERE rowid > ?', (pending_before,))
-        elif table == "brave_searches":
-            # Every copy has the base times: keep only a newer one, or an older copy
-            # merged later would undo it and the Brave quota would be spent every run.
-            # "WHERE true" lets SQLite parse ON CONFLICT after a SELECT.
-            cursor.execute(f'INSERT INTO main.brave_searches ({cols}) {select} WHERE true '
-                           'ON CONFLICT(source) DO UPDATE SET searched_at = excluded.searched_at '
-                           'WHERE excluded.searched_at > brave_searches.searched_at')
-        else:
-            # vagas_enviadas and any keyed table added later
-            cursor.execute(f'INSERT OR IGNORE INTO main."{table}" ({cols}) {select}')
-
-def find_copies(folder):
-    """{source: database path} of the job copies downloaded to `folder` (one db-<source>/ each)."""
-    copies = {}
-    for source in SOURCES:
-        path = os.path.join(folder, f"db-{source}", os.path.basename(CAMINHO_BANCO))
-        if os.path.exists(path):
-            copies[source] = path
-    return copies
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Busca vagas e envia ao grupo do Telegram.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--source", choices=SOURCES, help="roda só esta fonte e guarda os avisos sem enviar")
     mode.add_argument("--failed", choices=SOURCES, help="anota que a fonte parou antes do fim")
-    mode.add_argument("--merge", metavar="PASTA", help="junta as cópias do banco salvas pelos jobs")
     mode.add_argument("--send-jobs", action="store_true", help="envia as vagas guardadas pelos jobs")
     mode.add_argument("--send-alerts", action="store_true", help="envia os avisos guardados")
     return parser.parse_args(argv)
@@ -1268,7 +1192,7 @@ def main(argv=()):
         return
 
     # Parallel jobs only save their problems: the --send-alerts step sends one alert for all
-    parallel_step = bool(args.source or args.failed or args.merge or args.send_jobs)
+    parallel_step = bool(args.source or args.failed or args.send_jobs)
     # Full run (local) by default; the workflow runs each step in its own job
     if args.source:
         sources = [args.source]
@@ -1287,12 +1211,6 @@ def main(argv=()):
 
     if args.failed:
         anotar_avisos(SOURCES[args.failed][1], [AVISO_FONTE_INTERROMPIDA])
-    if args.merge:
-        copies = find_copies(args.merge)
-        for source, (_, label) in SOURCES.items():
-            if source not in copies:
-                anotar_avisos(label, [AVISO_FONTE_SEM_BANCO])
-        merge_databases(conn, cursor, copies)
 
     try:
         if parallel_step:

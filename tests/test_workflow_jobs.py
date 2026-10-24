@@ -25,6 +25,7 @@ SEARCH_WINDOW = 14 * 60
 with open(WORKFLOW, encoding="utf-8") as f:
     TEXT = f.read()
 LINES = TEXT.splitlines()
+DB_COPIES_REMOVED = "db copies and the db commit were removed: every job writes to the central database"
 
 
 def job_block(name: str) -> str:
@@ -139,17 +140,20 @@ class WorkflowLayoutTest(unittest.TestCase):
         self.assertIn("if: always()", last)
         self.assertNotIn("--source", last)
 
+    @unittest.skip(DB_COPIES_REMOVED)
     def test_last_job_merges_then_sends_jobs_then_alerts_then_commits(self):
         names = step_names("finalizar")
         order = ["Juntar cópias do banco", "Enviar vagas", "Enviar avisos", "Salvar banco de dados atualizado"]
         self.assertEqual([n for n in names if n in order], order)
 
+    @unittest.skip(DB_COPIES_REMOVED)
     def test_jobs_are_sent_even_when_a_search_job_failed(self):
         block = job_block("finalizar")
         step = block[block.index("- name: Enviar vagas"):block.index("- name: Enviar avisos")]
         self.assertIn("if: always() && steps.merge.outcome == 'success'", step)
         self.assertIn("run: python main.py --send-jobs", step)
 
+    @unittest.skip(DB_COPIES_REMOVED)
     def test_db_copy_upload_is_retried_with_overwrite_when_first_fails(self):
         first, wait, retry = ("Guardar cópia do banco", "Esperar antes de reenviar a cópia",
                               "Guardar cópia do banco (nova tentativa)")
@@ -241,6 +245,57 @@ class DependencyCacheTest(unittest.TestCase):
             block = step_block("buscar-vagas", name)
             if "uses: actions/cache@v4" in block:
                 self.assertNotIn("ms-playwright", block)
+
+
+class CentralDatabaseWorkflowTest(unittest.TestCase):
+    PB_ENV = ("PB_URL: ${{ vars.PB_URL }}", "PB_BOT_EMAIL: ${{ secrets.PB_BOT_EMAIL }}",
+              "PB_BOT_PASSWORD: ${{ secrets.PB_BOT_PASSWORD }}")
+
+    def test_workflow_only_reads_the_repository(self):
+        self.assertIn("permissions:\n  contents: read\n", TEXT)
+        self.assertNotIn("contents: write", TEXT)
+
+    def test_no_db_copy_artifact_or_commit_is_left(self):
+        for text in ("vagas_gupy", "upload-artifact", "download-artifact", "--merge", "steps.merge",
+                     "steps.upload", "git commit", "git push"):
+            with self.subTest(text=text):
+                self.assertNotIn(text, TEXT)
+        for text in ("copy", "copies", "cópia", "merge"):
+            with self.subTest(text=text):
+                self.assertNotIn(text, TEXT.lower())
+
+    def test_pocketbase_env_only_on_steps_that_run_the_bot(self):
+        bot_steps = {"buscar-vagas": ["Executar bot", "Anotar busca interrompida"],
+                     "finalizar": ["Enviar vagas", "Enviar avisos"]}
+        for job, expected in bot_steps.items():
+            with_bot = []
+            for name in step_names(job):
+                block = step_block(job, name)
+                with self.subTest(job=job, step=name):
+                    if "python main.py" in block:
+                        with_bot.append(name)
+                        for line in self.PB_ENV:
+                            self.assertIn(line, block)
+                    else:
+                        self.assertNotIn("PB_", block)
+            self.assertEqual(with_bot, expected)
+            self.assertNotIn("PB_", job_block(job).split("    steps:")[0])
+        self.assertNotIn("PB_", TEXT.split("jobs:")[0])
+
+    def test_interrupted_search_is_noted_even_when_it_never_started(self):
+        block = step_block("buscar-vagas", "Anotar busca interrompida")
+        conditions = [line.strip() for line in block.splitlines() if line.strip().startswith("if:")]
+        self.assertEqual(conditions, ["if: always() && steps.run.outcome != 'success'"])
+        self.assertEqual(step_names("buscar-vagas")[-1], "Anotar busca interrompida")
+
+    def test_jobs_and_alerts_are_sent_whatever_happened_before(self):
+        self.assertEqual(step_names("finalizar"), ["Checkout repositório", "Configurar Python",
+                                                   "Instalar dependências", "Enviar vagas", "Enviar avisos"])
+        for name, command in (("Enviar vagas", "--send-jobs"), ("Enviar avisos", "--send-alerts")):
+            block = step_block("finalizar", name)
+            conditions = [line.strip() for line in block.splitlines() if line.strip().startswith("if:")]
+            self.assertEqual(conditions, ["if: always()"])
+            self.assertIn(f"run: python main.py {command}", block)
 
 
 if __name__ == "__main__":
