@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import requests
 
 from linkedin_posts import BRAVE_URL, MAX_OFFSET, REQUEST_INTERVAL, RESULTS_PER_PAGE, parse_page_age
+from store import Source, Store
 
 SUMMARY_MAX_CHARS = 300
 # Brave only accepts these windows: past day, week, month and year
@@ -97,12 +98,7 @@ def _word_pattern(terms: list[str]) -> re.Pattern:
     return re.compile(rf"(?<!\w)(?:{alternatives})(?!\w)")
 
 
-def _already_sent(cursor, link: str) -> bool:
-    cursor.execute("SELECT 1 FROM vagas_enviadas WHERE link = ?", (link,))
-    return cursor.fetchone() is not None
-
-
-def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, required_terms, ignored_companies, send,
+def search_jobs(db: Store, *, api_key, filters, pages, excluded_sites, required_terms, ignored_companies, send,
                 errors: list[str] | None = None, blocked_terms: list[str] = (), max_age_days: int = 1) -> None:
     """Run every filter and send the relevant, unseen pages.
 
@@ -110,7 +106,7 @@ def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, requir
     required_terms: groups of words; the text needs at least one word of each group.
     blocked_terms: words that drop the page (e.g. "híbrido"), whole word.
     max_age_days: how far back to search; links already sent are never sent again.
-    send: main.registrar_e_enviar(conn, cursor, link, title, company, date, message, source).
+    send: (db, link, title, company, date, message, source: Source) -> None; registers the job, the module never writes to db.
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
     errors = [] if errors is None else errors
@@ -152,7 +148,7 @@ def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, requir
             if any(company in site.lower() for company in ignored):
                 print(f"   🚫 Site ignorado: {site[:50]}")
                 continue
-            if _already_sent(cursor, link):
+            if db.is_sent(link):
                 continue
 
             summary = text if len(text) <= SUMMARY_MAX_CHARS else text[:SUMMARY_MAX_CHARS].rsplit(" ", 1)[0] + "…"
@@ -163,4 +159,4 @@ def search_jobs(conn, cursor, *, api_key, filters, pages, excluded_sites, requir
                 f"💬 {html.escape(summary)}\n\n"
                 f"🔗 <a href='{html.escape(link)}'>Ver vaga</a>"
             )
-            send(conn, cursor, link, text, site, item["date"], message, "WEB")
+            send(db, link, text, site, item["date"], message, Source.WEB)

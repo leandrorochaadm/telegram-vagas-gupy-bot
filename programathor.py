@@ -10,6 +10,8 @@ from datetime import datetime
 
 import requests
 
+from store import Source, Store
+
 try:
     from bs4 import BeautifulSoup
 except ImportError:
@@ -89,19 +91,14 @@ def build_message(filter_name: str, job: dict) -> str:
     )
 
 
-def _already_sent(cursor, link: str) -> bool:
-    cursor.execute("SELECT 1 FROM vagas_enviadas WHERE link = ?", (link,))
-    return cursor.fetchone() is not None
-
-
-def search_jobs(conn, cursor, *, filters: list[dict], user_agent: str, send: Callable,
+def search_jobs(db: Store, *, filters: list[dict], user_agent: str, send: Callable,
                 check: Callable[[str, str], tuple[bool, str]], proxy: str | None = None,
                 errors: list[str] | None = None) -> None:
     """Run every filter and send the unseen jobs, up to MAX_PAGES pages each.
 
     filters: {"nome", "termo", "local_filtro"}; local_filtro is the URL slug ("remoto", "sao-paulo", "").
     check: main.filtros_basicos(title, company) -> (blocked, reason).
-    send: main.registrar_e_enviar(conn, cursor, link, title, company, date, message, source).
+    send: (db, link, title, company, date, message, source: Source) -> None; registers the job, the module never writes to db.
     proxy: SOCKS/HTTP proxy URL for the requests (WARP in CI).
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
@@ -138,11 +135,11 @@ def search_jobs(conn, cursor, *, filters: list[dict], user_agent: str, send: Cal
                     if blocked:
                         print(f"   {reason}")
                         continue
-                    if _already_sent(cursor, job["link"]):
+                    if db.is_sent(job["link"]):
                         continue
                     new_on_page += 1
-                    send(conn, cursor, job["link"], job["title"], job["company"],
-                         datetime.now().strftime("%d/%m/%Y"), build_message(name, job), "PROGRAMATHOR")
+                    send(db, job["link"], job["title"], job["company"],
+                         datetime.now().strftime("%d/%m/%Y"), build_message(name, job), Source.PROGRAMATHOR)
 
                 print(f"   📄 Página {page}: {len(jobs)} vagas, {new_on_page} novas.")
                 if new_on_page == 0:

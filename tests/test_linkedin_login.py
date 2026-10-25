@@ -14,9 +14,14 @@ from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import linkedin_login  # noqa: E402
 import main  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Collection, Source  # noqa: E402
+
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
 
 NOW = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
 COOKIE = "AQEDAR-cookie"
@@ -353,6 +358,7 @@ class LoginWallTest(unittest.TestCase):
         self.assertEqual(params["datePosted"], ['["past-24h"]'])
 
 
+@unittest.skip(SQLITE_REMOVED)
 class EstadoLoginTest(unittest.TestCase):
 
     def setUp(self):
@@ -413,6 +419,7 @@ class EstadoLoginTest(unittest.TestCase):
         self.assertNotIn(COOKIE, str(rows))
 
 
+@unittest.skip(SQLITE_REMOVED)
 class BuscarPostsComLoginTest(unittest.TestCase):
 
     def setUp(self):
@@ -510,6 +517,189 @@ class BuscarPostsComLoginTest(unittest.TestCase):
     def test_blocked_page_is_alerted_with_status(self):
         self.run_with(side_effect=linkedin_login.SearchBlocked(999))
         self.assertEqual(main._avisos, [("LINKEDIN PUBLICAÇÕES",
+                                         "FLUTTER · VAGA · REMOTO: o LinkedIn bloqueou a busca de publicações (código 999).")])
+        main.linkedin_posts.search_posts.assert_not_called()
+
+    def test_unreadable_page_is_alerted(self):
+        self.run_with(side_effect=linkedin_login.ResultsNotFound())
+        self.assertEqual(len(main._avisos), 1)
+        self.assertIn("não carregou ou mudou de formato", main._avisos[0][1])
+
+    def test_page_error_is_alerted_without_brave(self):
+        self.run_with(side_effect=TimeoutError("page timeout"))
+        self.assertEqual(len(main._avisos), 1)
+        self.assertIn("FLUTTER", main._avisos[0][1])
+        main.linkedin_posts.search_posts.assert_not_called()
+
+    def test_runs_with_cookie_and_no_brave_key(self):
+        with mock.patch.object(main, "BRAVE_API_KEY", None):
+            self.run_with(return_value=[logged_post()])
+        main.enviar_telegram.assert_called_once()
+
+
+class EstadoLoginStoreTest(unittest.TestCase):
+
+    def setUp(self):
+        self.db = FakeStore()
+        self.erros = []
+
+    def estado(self, now=NOW, cookie=COOKIE):
+        return main.estado_login_linkedin(self.db, cookie, agora=now)
+
+    def expire(self, now=NOW, cookie=COOKIE):
+        main.marcar_login_expirado(self.db, cookie, self.erros, agora=now)
+
+    def test_first_search_is_ok(self):
+        self.assertEqual(self.estado(), "ok")
+
+    def test_waits_inside_interval(self):
+        self.estado()
+        self.assertEqual(self.estado(now=NOW + timedelta(minutes=30)), "espera")
+
+    def test_ok_after_interval_with_slack(self):
+        self.estado()
+        self.assertEqual(self.estado(now=NOW + timedelta(minutes=55)), "ok")
+
+    def test_expiry_alerts_once_then_pauses(self):
+        self.estado()
+        self.expire()
+        self.assertEqual(self.erros, [main.AVISO_COOKIE_LINKEDIN])
+        self.assertEqual(self.estado(now=NOW + timedelta(hours=2)), "expirado")
+        self.assertEqual(self.erros, [main.AVISO_COOKIE_LINKEDIN])
+
+    def test_retries_once_after_a_day(self):
+        self.estado()
+        self.expire()
+        self.assertEqual(self.estado(now=NOW + timedelta(hours=24)), "ok")
+        # The retry restarts the 24h count, even if it fails for another reason
+        self.assertEqual(self.estado(now=NOW + timedelta(hours=25)), "expirado")
+        self.assertEqual(self.estado(now=NOW + timedelta(hours=48)), "ok")
+
+    def test_valid_cookie_clears_the_pause(self):
+        self.estado()
+        self.expire()
+        main.marcar_login_valido(self.db, COOKIE)
+        self.assertEqual(self.estado(now=NOW + timedelta(hours=2)), "ok")
+
+    def test_new_cookie_resumes_search(self):
+        self.estado()
+        self.expire()
+        self.assertEqual(self.estado(now=NOW + timedelta(minutes=5), cookie="new-cookie"), "ok")
+        # The old cookie's state is gone, so the new one is not paused
+        self.assertEqual(self.db.count(Collection.LINKEDIN_SESSIONS), 1)
+
+    def test_db_keeps_only_a_hash_of_the_cookie(self):
+        with mock.patch.object(self.db, "save_linkedin_session", wraps=self.db.save_linkedin_session) as save:
+            self.estado()
+            self.expire()
+        for call in save.call_args_list:
+            self.assertNotIn(COOKIE, str(call))
+        self.assertIsNotNone(self.db.linkedin_session(main._hash_cookie(COOKIE)))
+
+    def test_expired_without_reminder_retries(self):
+        self.db.save_linkedin_session(main._hash_cookie(COOKIE), expired_at=NOW)
+        self.assertEqual(self.estado(), "ok")
+
+    def test_reminder_limit(self):
+        self.expire()
+        limit = NOW + timedelta(hours=24) - timedelta(minutes=main.FOLGA_INTERVALO_BRAVE_MIN)
+        self.assertEqual(self.estado(now=limit), "ok")
+        self.assertEqual(self.estado(now=limit - timedelta(seconds=1)), "expirado")
+
+
+class BuscarPostsComLoginStoreTest(unittest.TestCase):
+
+    def setUp(self):
+        self.db = FakeStore()
+        main._enviados_sessao.clear()
+        main._avisos.clear()
+        self.addCleanup(main._avisos.clear)
+        patches = [
+            mock.patch.object(main, "LINKEDIN_LI_AT", COOKIE),
+            mock.patch.object(main, "BRAVE_API_KEY", "key"),
+            mock.patch.object(main, "enviar_telegram", return_value=True),
+            mock.patch.object(main.time, "sleep"),
+            mock.patch.object(main.linkedin_posts, "search_posts", return_value=[]),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_with(self, **search):
+        with mock.patch.object(main.linkedin_login, "search_posts", **search) as logged:
+            main.buscar_posts_linkedin(self.db)
+        return logged
+
+    def test_sends_logged_post_without_using_brave(self):
+        self.run_with(return_value=[logged_post()])
+        main.enviar_telegram.assert_called_once()
+        mensagem = main.enviar_telegram.call_args.args[0]
+        self.assertIn("Maria Souza", mensagem)
+        self.assertIn(LINK, mensagem)
+        main.linkedin_posts.search_posts.assert_not_called()
+
+    def test_logged_post_goes_through_relevance_filter(self):
+        self.run_with(return_value=[logged_post(text="Vaga Flutter presencial em SP")])
+        main.enviar_telegram.assert_not_called()
+
+    def test_expired_cookie_alerts_and_falls_back_to_brave(self):
+        self.run_with(side_effect=linkedin_login.LoginExpired("https://www.linkedin.com/login"))
+        self.assertEqual(main._avisos, [(Source.LINKEDIN_POSTS, main.AVISO_COOKIE_LINKEDIN)])
+        main.linkedin_posts.search_posts.assert_called_once()
+
+    def test_expired_cookie_is_not_used_on_the_next_run(self):
+        self.run_with(side_effect=linkedin_login.LoginExpired("https://www.linkedin.com/login"))
+        main._avisos.clear()
+        logged = self.run_with(return_value=[])
+        logged.assert_not_called()
+        self.assertEqual(main._avisos, [])
+
+    def pause_a_day_ago(self):
+        """Cookie expired on a previous run, whose alert went out over a day ago."""
+        self.run_with(side_effect=linkedin_login.LoginExpired("/login"))
+        dia_atras = datetime.now(timezone.utc) - timedelta(hours=25)
+        self.db.save_linkedin_session(main._hash_cookie(COOKIE), searched_at=dia_atras,
+                                      expired_at=dia_atras, reminded_at=dia_atras)
+        main._avisos.clear()
+        main.linkedin_posts.search_posts.reset_mock()
+
+    def test_same_cookie_valid_again_resumes_without_alert(self):
+        self.pause_a_day_ago()
+        logged = self.run_with(return_value=[logged_post()])
+        logged.assert_called_once()
+        main.enviar_telegram.assert_called_once()
+        self.assertEqual(main._avisos, [])
+        self.assertIsNone(self.db.linkedin_session(main._hash_cookie(COOKIE)).expired_at)
+
+    def test_failed_retry_alerts_again(self):
+        self.pause_a_day_ago()
+        self.run_with(side_effect=linkedin_login.LoginExpired("/login"))
+        self.assertEqual(main._avisos, [(Source.LINKEDIN_POSTS, main.AVISO_COOKIE_LINKEDIN)])
+
+    def test_retry_that_fails_for_another_reason_keeps_the_pause(self):
+        self.pause_a_day_ago()
+        self.run_with(side_effect=linkedin_login.SearchBlocked(999))
+        logged = self.run_with(return_value=[])
+        logged.assert_not_called()
+
+    def test_search_does_not_force_the_bots_fixed_user_agent(self):
+        logged = self.run_with(return_value=[])
+        self.assertNotIn("user_agent", logged.call_args.kwargs)
+
+    def test_second_run_inside_interval_skips_everything(self):
+        self.run_with(return_value=[])
+        logged = self.run_with(return_value=[])
+        logged.assert_not_called()
+        main.linkedin_posts.search_posts.assert_not_called()
+
+    def test_missing_playwright_falls_back_to_brave(self):
+        self.run_with(side_effect=ImportError("playwright"))
+        main.linkedin_posts.search_posts.assert_called_once()
+        self.assertEqual(main._avisos, [])
+
+    def test_blocked_page_is_alerted_with_status(self):
+        self.run_with(side_effect=linkedin_login.SearchBlocked(999))
+        self.assertEqual(main._avisos, [(Source.LINKEDIN_POSTS,
                                          "FLUTTER · VAGA · REMOTO: o LinkedIn bloqueou a busca de publicações (código 999).")])
         main.linkedin_posts.search_posts.assert_not_called()
 

@@ -219,3 +219,7 @@ __marimo__/
 
 # Local scratch files (plans, notes)
 temp/
+
+# Local databases (state now lives in PocketBase)
+vagas_gupy.db*
+pocketbase/pb_data/

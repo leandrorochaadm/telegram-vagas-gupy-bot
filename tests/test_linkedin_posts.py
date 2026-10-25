@@ -10,9 +10,14 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import linkedin_posts  # noqa: E402
 import main  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Source  # noqa: E402
+
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
 
 
 def hours_ago(n):
@@ -120,6 +125,7 @@ class SearchPostsTest(unittest.TestCase):
         self.assertEqual(errors, ["código 429"])
 
 
+@unittest.skip(SQLITE_REMOVED)
 class BuscarPostsLinkedinTest(unittest.TestCase):
 
     def setUp(self):
@@ -190,6 +196,81 @@ class BuscarPostsLinkedinTest(unittest.TestCase):
              mock.patch.object(main.linkedin_posts, "search_posts") as search:
             main.buscar_posts_linkedin(self.conn, self.cursor)
         search.assert_not_called()
+
+
+class BuscarPostsLinkedinStoreTest(unittest.TestCase):
+
+    def setUp(self):
+        self.db = FakeStore()
+        main._enviados_sessao.clear()
+        patches = [
+            mock.patch.object(main, "BRAVE_API_KEY", "key"),
+            # A cookie in the local .env would open a real browser (see test_linkedin_login.py)
+            mock.patch.object(main, "LINKEDIN_LI_AT", None),
+            mock.patch.object(main, "enviar_telegram"),
+            mock.patch.object(main.time, "sleep"),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_with(self, posts):
+        with mock.patch.object(main.linkedin_posts, "search_posts", return_value=posts):
+            main.buscar_posts_linkedin(self.db)
+
+    def test_sends_post_with_author_and_link(self):
+        self.run_with([linkedin_posts.parse_result(brave_result())])
+        main.enviar_telegram.assert_called_once()
+        mensagem = main.enviar_telegram.call_args.args[0]
+        self.assertIn("Maria Souza", mensagem)
+        self.assertIn("Ver publicação", mensagem)
+
+    def test_skips_post_without_flutter(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(
+            title="Maria on LinkedIn: vaga React", description="React e Node"))])
+        main.enviar_telegram.assert_not_called()
+
+    def test_skips_post_without_vaga(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(
+            title="Maria on LinkedIn: dica de Flutter", description="Trabalho remoto com Flutter"))])
+        main.enviar_telegram.assert_not_called()
+
+    def test_skips_post_without_remote(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(
+            title="Maria on LinkedIn: vaga Flutter", description="Vaga presencial em SP"))])
+        main.enviar_telegram.assert_not_called()
+
+    def test_accepts_remoto_as_well_as_remota(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(
+            title="Maria on LinkedIn: vaga Flutter", description="Trabalho remoto"))])
+        main.enviar_telegram.assert_called_once()
+
+    def test_accepts_vagas_plural(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(
+            title="Maria on LinkedIn: vagas Flutter", description="Trabalho remoto"))])
+        main.enviar_telegram.assert_called_once()
+
+    def test_skips_already_sent_link(self):
+        post = linkedin_posts.parse_result(brave_result())
+        self.db.mark_sent(post["link"], "", "")
+        self.run_with([post])
+        main.enviar_telegram.assert_not_called()
+
+    def test_escapes_html_in_post_text(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(description="Vaga remota Flutter & Dart <3"))])
+        mensagem = main.enviar_telegram.call_args.args[0]
+        self.assertIn("Flutter &amp; Dart &lt;3", mensagem)
+
+    def test_disabled_without_api_key(self):
+        with mock.patch.object(main, "BRAVE_API_KEY", None), \
+             mock.patch.object(main.linkedin_posts, "search_posts") as search:
+            main.buscar_posts_linkedin(self.db)
+        search.assert_not_called()
+
+    def test_queued_post_keeps_the_posts_source(self):
+        with mock.patch.object(main, "_queue_jobs", True):
+            self.run_with([linkedin_posts.parse_result(brave_result())])
+        self.assertIs(self.db.queued_jobs()[0].source, Source.LINKEDIN_POSTS)
 
 
 if __name__ == "__main__":

@@ -5,15 +5,15 @@ on:
   # it calls workflow_dispatch on time, since GitHub's own
   # schedule is delayed/dropped.
   # This sparse cron is only a fallback in case the Worker stops (e.g. expired
-  # token); extra runs are harmless because sent jobs are deduplicated in the db.
+  # token); extra runs are harmless because sent jobs are deduplicated in the PocketBase database.
   schedule:
     - cron: '23 12,16,20 * * *'   # Reserva: 9h23, 13h23 e 17h23 (BRT), todo dia
   workflow_dispatch:              # Permite rodar manualmente pelo GitHub
 
 permissions:
-  contents: write
+  contents: read
 
-# Avoid two runs overlapping and racing on the vagas_gupy.db push
+# Avoid two runs overlapping and sending the same queued jobs twice
 concurrency:
   group: vagas-bot
   cancel-in-progress: false
@@ -152,53 +152,29 @@ jobs:
           CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
           LINKEDIN_LI_AT: ${{ secrets.LINKEDIN_LI_AT }}
-        # Search until 14 min after the job start (1 min left to save the copy), so the
-        # sending job starts ~15 min after the run. Jobs are queued in the database as they
-        # are found: a search cut short still has the ones it found sent.
+          PB_URL: ${{ vars.PB_URL }}
+          PB_BOT_EMAIL: ${{ secrets.PB_BOT_EMAIL }}
+          PB_BOT_PASSWORD: ${{ secrets.PB_BOT_PASSWORD }}
+        # Search until 14 min after the job start, so the sending job starts ~15 min
+        # after the run. Jobs are queued in the database as they are
+        # found: a search cut short still has the ones it found sent.
         run: |
           remaining=$(( JOB_START + 14 * 60 - $(date +%s) ))
           [ "$remaining" -gt 0 ] || { echo "No time left after setup"; exit 1; }
           timeout "$remaining" python main.py --source ${{ matrix.source }}
 
-      # Hung (timeout) or crashed: the final alert says this site stopped early
+      # Hung (timeout), crashed or never started (setup failed): the final alert says this site stopped early
       - name: Anotar busca interrompida
-        if: always() && steps.run.outcome != 'success' && steps.run.outcome != 'skipped'
+        if: always() && steps.run.outcome != 'success'
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
+          PB_URL: ${{ vars.PB_URL }}
+          PB_BOT_EMAIL: ${{ secrets.PB_BOT_EMAIL }}
+          PB_BOT_PASSWORD: ${{ secrets.PB_BOT_PASSWORD }}
         run: python main.py --failed ${{ matrix.source }}
 
-      # Copy of the database with the jobs this site found (queued, not sent yet); the next job merges all copies.
-      # The journal goes too: a search killed mid-write leaves its rollback there.
-      # Not when the search never started (setup failed): the merge then alerts that this site did not run
-      - name: Guardar cópia do banco
-        id: upload
-        continue-on-error: true
-        if: always() && steps.run.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
-        with:
-          name: db-${{ matrix.source }}
-          path: vagas_gupy.db*
-          retention-days: 1
-          if-no-files-found: ignore
-
-      # A network error while finalizing the upload loses the whole copy: wait and send it once more
-      - name: Esperar antes de reenviar a cópia
-        if: always() && steps.run.outcome != 'skipped' && steps.upload.outcome == 'failure'
-        run: sleep 15
-
-      - name: Guardar cópia do banco (nova tentativa)
-        if: always() && steps.run.outcome != 'skipped' && steps.upload.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: db-${{ matrix.source }}
-          path: vagas_gupy.db*
-          retention-days: 1
-          if-no-files-found: ignore
-          overwrite: true
-
-  # Runs last: merges the copies into vagas_gupy.db, sends every queued job (the same
-  # job from two sites goes out once), sends one alert and makes a single commit
+  # Runs last: sends every queued job (the same job from two sites goes out once) and one alert for all sites
   finalizar:
     needs: buscar-vagas
     if: always()
@@ -219,45 +195,24 @@ jobs:
       - name: Instalar dependências
         run: pip install -r requirements.txt
 
-      # No copy at all (every job failed early) must not stop the merge: it alerts each missing site
-      - name: Baixar cópias do banco
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          pattern: db-*
-          path: copias
-
-      - name: Juntar cópias do banco
-        id: merge
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
-        run: python main.py --merge copias
-
       # A job that does not reach the group stays queued for the next run
       - name: Enviar vagas
-        if: always() && steps.merge.outcome == 'success'
+        if: always()
         timeout-minutes: 15
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
+          PB_URL: ${{ vars.PB_URL }}
+          PB_BOT_EMAIL: ${{ secrets.PB_BOT_EMAIL }}
+          PB_BOT_PASSWORD: ${{ secrets.PB_BOT_PASSWORD }}
         run: python main.py --send-jobs
 
       - name: Enviar avisos
-        if: always() && steps.merge.outcome == 'success'
+        if: always()
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID_GRUPO: ${{ secrets.CHAT_ID_GRUPO }}
+          PB_URL: ${{ vars.PB_URL }}
+          PB_BOT_EMAIL: ${{ secrets.PB_BOT_EMAIL }}
+          PB_BOT_PASSWORD: ${{ secrets.PB_BOT_PASSWORD }}
         run: python main.py --send-alerts
-
-      - name: Salvar banco de dados atualizado
-        if: always() && steps.merge.outcome == 'success'
-        continue-on-error: true
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "Vagas Bot"
-          git add vagas_gupy.db
-          git diff --staged --quiet || git commit -m "chore: atualiza vagas_gupy.db [skip ci]"
-          # Pick up commits pushed to main while the bot was running, otherwise the push is rejected
-          git pull --rebase
-          git push

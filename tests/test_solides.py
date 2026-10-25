@@ -11,8 +11,13 @@ from datetime import datetime, timedelta
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import main  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Source  # noqa: E402
+
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
 
 FILTER = {"nome": "FLUTTER · REMOTO", "caminho": "remoto/flutter"}
 
@@ -193,6 +198,7 @@ class SolidesPageTest(unittest.TestCase):
         self.sleep.assert_not_called()
 
 
+@unittest.skip(SQLITE_REMOVED)
 class BuscarVagasSolidesTest(unittest.TestCase):
 
     def setUp(self):
@@ -296,6 +302,105 @@ class BuscarVagasSolidesTest(unittest.TestCase):
         self.assertEqual(self.saved_links(), [])
         self.assertEqual(self.sent, [])
         self.assertEqual(main._avisos, [("SOLIDES", "FLUTTER · REMOTO: o site recusou a busca (403).")])
+
+
+class BuscarVagasSolidesStoreTest(unittest.TestCase):
+
+    def setUp(self):
+        self.db = FakeStore()
+        main._enviados_sessao.clear()
+        main._avisos.clear()
+        self.addCleanup(main._avisos.clear)
+        self.sent = []
+        for target, value in [
+            ("FILTROS_SOLIDES", [FILTER]),
+            ("DIAS_BUSCA_SOLIDES", 20),
+            ("enviar_telegram", lambda message: self.sent.append(message) or True),
+        ]:
+            patcher = mock.patch.object(main, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(main.time, "sleep")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_with_pages(self, *pages):
+        """Each page is (vagas, total_pages, textos) or an Exception to raise."""
+        with mock.patch.object(main, "_solides_pagina", side_effect=list(pages)) as pagina:
+            main.buscar_vagas_solides(self.db)
+        return pagina
+
+    def saved_links(self):
+        return list(self.db.sent)
+
+    def test_sends_recent_flutter_job_with_company_link(self):
+        self.run_with_pages(([make_vaga()], 1, {}))
+
+        self.assertEqual(self.saved_links(), ["https://cedrotech.vagas.solides.com.br/vaga/914710"])
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("📍 <b>Local:</b> Uberlândia - MG", self.sent[0])
+        self.assertIn("💻 <b>Modelo:</b> Remoto", self.sent[0])
+
+    def test_escapes_html_in_title_and_company(self):
+        self.run_with_pages(([make_vaga(title="Dev Flutter & React <Pleno>", companyName="A&B")], 1, {}))
+
+        self.assertIn("Dev Flutter &amp; React &lt;Pleno&gt;", self.sent[0])
+        self.assertIn("A&amp;B", self.sent[0])
+
+    def test_skips_title_without_flutter(self):
+        self.run_with_pages(([make_vaga(title="Desenvolvedor React Native")], 1, {}))
+        self.assertEqual(self.sent, [])
+
+    def test_skips_ignored_company(self):
+        self.run_with_pages(([make_vaga(companyName="Jobgether")], 1, {}))
+        self.assertEqual(self.sent, [])
+
+    def test_skips_job_older_than_limit(self):
+        self.run_with_pages(([make_vaga(createdAt=days_ago(21))], 1, {}))
+        self.assertEqual(self.sent, [])
+
+    def test_skips_job_already_in_database(self):
+        self.db.mark_sent("https://cedrotech.vagas.solides.com.br/vaga/914710", "", "")
+        self.run_with_pages(([make_vaga()], 1, {}))
+        self.assertEqual(self.sent, [])
+
+    def test_skips_job_without_slug_or_id(self):
+        self.run_with_pages(([make_vaga(slug=None), make_vaga(id=None)], 1, {}))
+        self.assertEqual(self.sent, [])
+
+    def test_filter_name_no_longer_drops_non_remote_jobs(self):
+        # Modality comes from the URL path; the "REMOTO" label must not filter by itself
+        self.run_with_pages(([make_vaga(jobType="hibrido")], 1, {}))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_null_fields_do_not_abort_the_remaining_jobs(self):
+        null_vaga = make_vaga(id=1, companyName=None, city={"name": None}, state=None,
+                              jobType=None, createdAt=None, description=None)
+        self.run_with_pages(([null_vaga, make_vaga(id=2, title="Dev Flutter Sênior")], 1, {}))
+
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("Empresa não informada", self.sent[0])
+        self.assertIn("📍 <b>Local:</b> Brasil", self.sent[0])
+        self.assertNotIn("None", self.sent[0])
+
+    def test_paginates_until_total_pages(self):
+        pagina = self.run_with_pages(
+            ([make_vaga(id=1)], 2, {}),
+            ([make_vaga(id=2, title="Flutter Dev II")], 2, {}),
+        )
+        self.assertEqual([c.args[1] for c in pagina.call_args_list], [1, 2])
+        self.assertEqual(len(self.sent), 2)
+
+    def test_stops_on_empty_page(self):
+        pagina = self.run_with_pages(([], 5, {}))
+        self.assertEqual(pagina.call_count, 1)
+
+    def test_page_error_stops_search_without_raising(self):
+        pagina = self.run_with_pages(main.FalhaFonte("o site recusou a busca (403)"))
+        self.assertEqual(pagina.call_count, 1)
+        self.assertEqual(self.saved_links(), [])
+        self.assertEqual(self.sent, [])
+        self.assertEqual(main._avisos, [(Source.SOLIDES, "FLUTTER · REMOTO: o site recusou a busca (403).")])
 
 
 if __name__ == "__main__":

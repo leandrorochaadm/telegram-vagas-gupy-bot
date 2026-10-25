@@ -1,6 +1,6 @@
 # 🤖 Multi-Source Job Tracker: Automação de Vagas para Devs no Telegram
 
-[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Sources](https://img.shields.io/badge/Fontes-Gupy%20%7C%20LinkedIn%20%7C%20Solides%20%7C%20InHire%20%7C%20Remotar-orange)]()
 [![Telegram](https://img.shields.io/badge/Alertas-Telegram-2CA5E0)]()
 [![GitHub Actions](https://img.shields.io/badge/Automação-GitHub%20Actions-181717?logo=github)]()
@@ -16,6 +16,7 @@ Bot que monitora vagas de emprego em múltiplas plataformas e envia alertas form
 - [Fontes monitoradas](#-fontes-monitoradas)
 - [Pré-requisitos](#-pré-requisitos)
 - [Instalação e configuração](#-instalação-e-configuração)
+- [Banco de dados (PocketBase)](#-banco-de-dados-pocketbase)
 - [Guia de configuração detalhado](#-guia-de-configuração-detalhado)
 - [Configurando o GitHub Actions](#-configurando-o-github-actions)
 - [Exemplo de alerta](#-exemplo-de-alerta)
@@ -35,7 +36,7 @@ Aplica filtros de perfil (termo obrigatório no título, empresas ignoradas)
     ↓
 Envia alertas formatados no Telegram
     ↓
-Salva histórico no banco SQLite (evita reenvio de vagas já vistas)
+Salva o histórico no PocketBase (evita reenvio de vagas já vistas)
 ```
 
 ---
@@ -55,7 +56,9 @@ Salva histórico no banco SQLite (evita reenvio de vagas já vistas)
 
 ## 📦 Pré-requisitos
 
-- Python 3.10+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (só para os scripts de `scripts/`)
+- Um PocketBase (local ou na VPS); veja [Banco de dados (PocketBase)](#-banco-de-dados-pocketbase)
 - Conta no GitHub (para rodar via GitHub Actions)
 - Um bot do Telegram criado via [@BotFather](https://t.me/botfather)
 - O ID do seu grupo ou canal do Telegram
@@ -87,7 +90,12 @@ TELEGRAM_TOKEN=seu_token_aqui
 CHAT_ID_GRUPO=seu_chat_id_aqui
 BRAVE_API_KEY=sua_chave_brave   # opcional: publicações do LinkedIn e busca na web
 LINKEDIN_LI_AT=seu_cookie_li_at # opcional: publicações do LinkedIn com login
+PB_URL=https://job-search-api.tektonsoftware.com.br # endereço do PocketBase
+PB_BOT_EMAIL=email_da_conta_do_bot
+PB_BOT_PASSWORD=senha_da_conta_do_bot
 ```
+
+> `PB_URL`, `PB_BOT_EMAIL` e `PB_BOT_PASSWORD` são obrigatórias. Veja a seção [Banco de dados (PocketBase)](#-banco-de-dados-pocketbase).
 
 > **Como obter o `LINKEDIN_LI_AT` (opcional):** entre no LinkedIn pelo navegador, abra o DevTools (F12) → **Application** → **Cookies** → `https://www.linkedin.com` e copie o valor do cookie `li_at`. Ele dá acesso à sua conta: guarde só no `.env` e nos secrets, nunca no código. Para rodar localmente, instale também o navegador do Playwright: `python -m playwright install chromium`.
 
@@ -110,6 +118,45 @@ LINKEDIN_LI_AT=seu_cookie_li_at # opcional: publicações do LinkedIn com login
 ```bash
 python main.py
 ```
+
+---
+
+## 🗄️ Banco de dados (PocketBase)
+
+O bot guarda o estado no PocketBase: vagas enviadas (`sent_jobs`), fila (`queued_jobs`), avisos (`alerts`, `alert_sends`), cota da Brave (`brave_searches`), sessão do LinkedIn (`linkedin_sessions`) e empresas da InHire (`inhire_tenants`, `inhire_discoveries`). Só a conta de login `bot_accounts` acessa, e não há cadastro pela API.
+
+| Variável | O que é |
+|---|---|
+| `PB_URL` | Endereço do PocketBase |
+| `PB_BOT_EMAIL` | E-mail da conta do bot |
+| `PB_BOT_PASSWORD` | Senha da conta do bot |
+
+Sem alguma delas, o bot não busca nada e manda o aviso "Não foi possível abrir o banco de vagas…".
+
+**Rodar local:**
+1. Baixe o PocketBase 0.40.5.
+2. Suba com `pocketbase serve --dir=pocketbase/pb_data --migrationsDir=pocketbase/pb_migrations`. Ele aplica as migrations ao subir, em `http://127.0.0.1:8090`.
+3. Crie o superusuário: `pocketbase superuser upsert <email> <senha> --dir=pocketbase/pb_data`.
+4. Crie a conta do bot: `uv run scripts/create_bot_account.py --url http://127.0.0.1:8090 --email <superusuário> --bot-email bot@local.test --out temp/pb-bot-password.txt`. O script pede a senha do superusuário no terminal e grava a senha do bot no arquivo, sem mostrar.
+5. No `.env`, preencha `PB_URL=http://127.0.0.1:8090`, o e-mail do bot e o conteúdo do arquivo.
+
+`pocketbase/pb_data/` e `temp/` já estão no `.gitignore`.
+
+**Testes:** `python -m unittest discover -s tests`. Com `POCKETBASE_BIN=<caminho do binário>`, os testes de permissão e de contrato rodam contra um PocketBase descartável (sem a variável, são pulados).
+
+**Produção (VPS):** a API fica em `https://job-search-api.tektonsoftware.com.br`, no serviço `pocketbase-job-search`. O painel `/_/` é fechado para a internet; abra por túnel SSH: `ssh -N -L 8093:127.0.0.1:8093 hostinger` e `http://127.0.0.1:8093/_/`.
+
+**Migration nova:** crie o `.js` em `pocketbase/pb_migrations/` e rode o provisionamento na VPS de novo, primeiro com `--dry-run`:
+
+```bash
+sudo python3 /home/deploy/.claude/skills/publish-pocketbase-pwa/scripts/pb_provision.py --app job-search --api-host job-search-api.tektonsoftware.com.br --pb-version 0.40.5 --migrations pocketbase/pb_migrations --origin https://job-search.tektonsoftware.com.br --private-superuser --skip-deploy-key
+```
+
+Não há chave de deploy: nada aplica migration sozinho.
+
+**Histórico antigo:** o arquivo do banco SQLite antigo saiu do repositório e continua no histórico do git. O `scripts/import_sqlite.py` copia um `.db` antigo para o PocketBase (`uv run scripts/import_sqlite.py --db <arquivo.db> --url <url> --email <superusuário>`, com a senha pelo terminal). Pode rodar de novo sem duplicar.
+
+**Fork:** suba seu próprio PocketBase com as migrations de `pocketbase/pb_migrations`, crie a conta do bot e aponte `PB_URL` para ele.
 
 ---
 
@@ -206,7 +253,7 @@ Busca **publicações** (posts) do LinkedIn das últimas 24h, como "estamos cont
 - **Com login (`LINKEDIN_LI_AT`)**: o bot abre a busca de publicações do próprio LinkedIn num navegador sem janela (Playwright), filtrada pelas últimas 24h e ordenada pelas mais recentes. Acha bem mais publicações e traz o texto inteiro. O código fica em `linkedin_login.py`.
 - **Sem login (reserva)**: pesquisa `site:linkedin.com/posts` na [Brave Search API](https://brave.com/search/api/). Requer `BRAVE_API_KEY`. Só é usado sem cookie ou com o cookie expirado. A Brave indexa poucas publicações recentes, então costuma achar pouco. O código fica em `linkedin_posts.py`.
 
-**Cookie expirado:** quando o LinkedIn pede login de novo (ou fica redirecionando a página em círculo, o `ERR_TOO_MANY_REDIRECTS`), o bot manda no aviso *"O login do LinkedIn expirou. Atualize o cookie (secret LINKEDIN_LI_AT)."* e para de abrir o LinkedIn até o secret mudar, para não insistir numa sessão barrada. A cada `INTERVALO_LEMBRETE_COOKIE_HORAS` (24h) ele tenta uma vez: se o mesmo cookie voltou a valer (ex.: você resolveu uma verificação de segurança no navegador), a busca volta sozinha; se não, o aviso se repete. Ao trocar o secret, a busca logada volta na execução seguinte. O estado fica na tabela `linkedin_session` do banco, que guarda só uma impressão digital (hash) do cookie, nunca o valor.
+**Cookie expirado:** quando o LinkedIn pede login de novo (ou fica redirecionando a página em círculo, o `ERR_TOO_MANY_REDIRECTS`), o bot manda no aviso *"O login do LinkedIn expirou. Atualize o cookie (secret LINKEDIN_LI_AT)."* e para de abrir o LinkedIn até o secret mudar, para não insistir numa sessão barrada. A cada `INTERVALO_LEMBRETE_COOKIE_HORAS` (24h) ele tenta uma vez: se o mesmo cookie voltou a valer (ex.: você resolveu uma verificação de segurança no navegador), a busca volta sozinha; se não, o aviso se repete. Ao trocar o secret, a busca logada volta na execução seguinte. O estado fica na coleção `linkedin_sessions` do PocketBase, que guarda só uma impressão digital (hash) do cookie, nunca o valor.
 
 > **Risco:** automação com conta pessoal vai contra os termos do LinkedIn, e os servidores do GitHub usam IP de datacenter. Por isso a busca logada roda no máximo uma vez por hora (`INTERVALO_POSTS_LINKEDIN_LOGIN_MIN`). Mesmo assim, o LinkedIn pode pedir verificação ou restringir a conta.
 
@@ -265,13 +312,13 @@ INTERVALO_WEB_MIN = 180
 
 Cada filtro × página também gasta 1 consulta da cota da Brave, somada às publicações do LinkedIn.
 
-**Cota da Brave:** o bot roda a cada 30 min, mas o plano grátis só aguenta ~1.000 consultas por mês. Por isso as buscas na Brave têm intervalo mínimo, guardado na tabela `brave_searches` do banco: `INTERVALO_POSTS_LINKEDIN_MIN = 60` (publicações) e `INTERVALO_WEB_MIN = 180` (web), cerca de 500 consultas por mês no total. Dentro do intervalo, só a busca na Brave é pulada; as outras fontes rodam normalmente. `FOLGA_INTERVALO_BRAVE_MIN = 10` evita pular a busca quando o disparo chega segundos antes de completar o intervalo.
+**Cota da Brave:** o bot roda a cada 30 min, mas o plano grátis só aguenta ~1.000 consultas por mês. Por isso as buscas na Brave têm intervalo mínimo, guardado na coleção `brave_searches` do PocketBase: `INTERVALO_POSTS_LINKEDIN_MIN = 60` (publicações) e `INTERVALO_WEB_MIN = 180` (web), cerca de 500 consultas por mês no total. Dentro do intervalo, só a busca na Brave é pulada; as outras fontes rodam normalmente. `FOLGA_INTERVALO_BRAVE_MIN = 10` evita pular a busca quando o disparo chega segundos antes de completar o intervalo.
 
 ---
 
 #### `FILTROS_INHIRE`
 
-A InHire não publica a lista de empresas: a busca de vagas precisa do subdomínio de cada uma. Por isso as empresas ficam na tabela `inhire_tenants` do banco, preenchida pela **descoberta automática** (ver abaixo).
+A InHire não publica a lista de empresas: a busca de vagas precisa do subdomínio de cada uma. Por isso as empresas ficam na coleção `inhire_tenants` do PocketBase, preenchida pela **descoberta automática** (ver abaixo).
 
 ```python
 FILTROS_INHIRE = [
@@ -286,11 +333,11 @@ FILTROS_INHIRE = [
 
 Só entram vagas remotas da InHire.
 
-> Para incluir uma empresa na mão: `sqlite3 vagas_gupy.db "INSERT OR IGNORE INTO inhire_tenants (slug, found_at) VALUES ('empresa', datetime('now'))"` (subdomínio de `empresa.inhire.app`).
+> Para incluir uma empresa na mão: crie um registro na coleção `inhire_tenants` pelo painel do PocketBase (`/_/`, local ou pelo túnel SSH), com `slug` = subdomínio de `empresa.inhire.app`.
 
 #### Descoberta automática de empresas da InHire
 
-O bot pesquisa páginas `*.inhire.app` no Yahoo (grátis) e, opcionalmente, na Brave (`USAR_BRAVE_DESCOBERTA_INHIRE = True`, requer `BRAVE_API_KEY`). Cada subdomínio achado fica salvo na tabela `inhire_tenants` do banco, então a lista cresce a cada rodada. Subdomínios que a InHire não reconhece são removidos sozinhos.
+O bot pesquisa páginas `*.inhire.app` no Yahoo (grátis) e, opcionalmente, na Brave (`USAR_BRAVE_DESCOBERTA_INHIRE = True`, requer `BRAVE_API_KEY`). Cada subdomínio achado fica salvo na coleção `inhire_tenants` do PocketBase, então a lista cresce a cada rodada. Subdomínios que a InHire não reconhece são removidos sozinhos.
 
 ```python
 TERMOS_DESCOBERTA_INHIRE = [
@@ -369,6 +416,10 @@ Vá em **Settings → Secrets and variables → Actions → New repository secre
 | `CHAT_ID_GRUPO` | ID do seu grupo ou canal do Telegram |
 | `BRAVE_API_KEY` | (Opcional) Chave da Brave Search API, para as publicações do LinkedIn e a busca na web |
 | `LINKEDIN_LI_AT` | (Opcional) Cookie `li_at` do LinkedIn, para buscar publicações com login. O navegador do Playwright só é instalado no workflow quando este secret existe |
+| `PB_BOT_EMAIL` | E-mail da conta do bot no PocketBase |
+| `PB_BOT_PASSWORD` | Senha da conta do bot no PocketBase |
+
+`PB_URL` é uma **variável**, não um secret (**Settings → Secrets and variables → Actions → Variables**), com o endereço da API do PocketBase. Só os passos que rodam o bot recebem as três.
 
 ### 2. Ative o workflow
 
@@ -390,10 +441,10 @@ Em um fork, sem o Worker, o bot roda só nos horários de reserva. Para ter o ag
 
 Cada site roda num job próprio, todos ao mesmo tempo. Se um site travar ou der erro, os outros seguem normalmente:
 
-1. **Um job por site** (Gupy, LinkedIn, publicações do LinkedIn, InHire, Sólides, Remotar e a busca na web), todos ao mesmo tempo. Cada job só **guarda** as vagas que acha numa fila do banco (tabela `vagas_pendentes`), sem enviar ao grupo. Cada um tem **15 min** contados do início (instalação incluída); quem passar disso é interrompido, mas as vagas que já guardou são enviadas.
-2. **Envio, por último:** junta as cópias no `vagas_gupy.db`, **envia todas as vagas da fila** de uma vez, envia **um aviso só** com os problemas de todos e faz um único commit.
+1. **Um job por site** (Gupy, LinkedIn, publicações do LinkedIn, InHire, Sólides, Remotar e a busca na web), todos ao mesmo tempo. Cada job só **guarda** as vagas que acha na fila do PocketBase (coleção `queued_jobs`), sem enviar ao grupo; cada job grava direto no banco central. Cada um tem **15 min** contados do início (instalação incluída); quem passar disso é interrompido, mas as vagas que já guardou são enviadas.
+2. **Envio, por último:** **envia todas as vagas da fila** de uma vez e **um aviso só** com os problemas de todos. Roda mesmo quando algum job de busca falhou. O workflow só lê o repositório: não grava nada nele.
 
-Como o envio acontece num lugar só, a mesma vaga achada em dois sites chega uma vez só ao grupo (vale a mensagem do site dedicado, que vem antes da web). Vaga que o Telegram recusar fica na fila e é enviada na próxima execução.
+Como o envio acontece num lugar só, a mesma vaga achada em dois sites chega uma vez só ao grupo (vale a mensagem do site dedicado, que vem antes da web). Vaga que o Telegram recusar fica na fila e é enviada na próxima execução. Job que falha antes de rodar o bot (ex.: instalação quebrada) não manda aviso próprio, só aparece vermelho no GitHub.
 
 Para rodar localmente, `python main.py` continua buscando em todos os sites, um depois do outro. Para um site só: `python main.py --source gupy` (opções em `python main.py --help`).
 
@@ -428,7 +479,7 @@ O que entra no aviso:
 - **Erro inesperado**: a fonte para e as outras continuam rodando.
 - **Vagas que o Telegram não entregou**: não ficam marcadas como enviadas e voltam na próxima execução. Quando o Telegram pede para esperar (limite de 20 mensagens por minuto num grupo), o bot espera e tenta de novo; entre uma vaga e outra ele já espera `PAUSA_ENTRE_VAGAS` segundos.
 - **beautifulsoup4 não instalado**: O LinkedIn fica desligado.
-- **Banco de vagas que não abre**: nenhuma busca é feita e o aviso sai na hora.
+- **Banco de vagas fora do ar** (o PocketBase não respondeu ou recusou o login do bot): nenhuma busca é feita e o aviso sai na hora.
 
 ```
 ⚠️ Problemas na varredura

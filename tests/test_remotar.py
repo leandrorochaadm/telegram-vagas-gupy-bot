@@ -12,9 +12,12 @@ from unittest import mock
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import main  # noqa: E402
 import remotar  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Source, StoreError  # noqa: E402
 
 NOW = datetime.fromisoformat("2026-09-30T12:00:00-03:00")
 
@@ -87,6 +90,10 @@ class BuildMessageTest(unittest.TestCase):
         self.assertIn("📅 <b>Publicada em:</b> 25/09/2026", message)
 
 
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
+
+
+@unittest.skip(SQLITE_REMOVED)
 class SearchJobsTest(unittest.TestCase):
 
     FILTERS = [{"nome": "FLUTTER · REMOTO", "termo": "flutter", "modalidades": ["remote"]}]
@@ -187,6 +194,45 @@ class SearchJobsTest(unittest.TestCase):
         errors = []
         self.run_with(requests.ConnectionError("down"), errors=errors)
         self.assertEqual(errors, ["FLUTTER · REMOTO: o site não respondeu."])
+
+
+class SearchJobsWithStoreTest(unittest.TestCase):
+
+    LINK = "https://remotar.com.br/job/1"
+
+    def setUp(self):
+        self.db = FakeStore()
+        self.send = mock.Mock()
+
+    def run_with(self, responses, db=None):
+        with mock.patch.object(remotar.requests, "get", side_effect=responses) as get, \
+             mock.patch.object(remotar.time, "sleep"):
+            remotar.search_jobs(db or self.db, filters=SearchJobsTest.FILTERS, max_age_days=30,
+                                ignore_foreign=True, user_agent="UA", check=main.filtros_basicos,
+                                send=self.send, now=NOW)
+        return get
+
+    def test_sends_new_job_with_store_and_source(self):
+        self.run_with([response([api_job()])])
+        args = self.send.call_args.args
+        self.assertIs(args[0], self.db)
+        self.assertEqual(args[1:4], (self.LINK, "Desenvolvedor Flutter Sênior", "Acme"))
+        self.assertEqual(args[4], "25/09/2026")
+        self.assertIs(args[-1], Source.REMOTAR)
+
+    def test_skips_marked_link(self):
+        self.db.mark_sent(self.LINK, "", "")
+        self.run_with([response([api_job()])])
+        self.send.assert_not_called()
+
+    def test_module_does_not_write_to_the_store(self):
+        self.run_with([response([api_job()])])
+        self.send.assert_called_once()
+        self.assertEqual(self.db.sent, {})
+
+    def test_store_error_propagates(self):
+        with self.assertRaises(StoreError):
+            self.run_with([response([api_job()])], db=FakeStore(fail_with=StoreError()))
 
 
 if __name__ == "__main__":

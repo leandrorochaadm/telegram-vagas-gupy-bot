@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 
 import requests
 
+from store import Source, Store
+
 API_URL = "https://api.remotar.com.br/jobs"
 SITE_URL = "https://remotar.com.br"
 MAX_PAGES = 5  # the API returns 50 jobs per page, newest first
@@ -88,11 +90,6 @@ def build_message(filter_name: str, job: dict) -> str:
     )
 
 
-def _already_sent(cursor, link: str) -> bool:
-    cursor.execute("SELECT 1 FROM vagas_enviadas WHERE link = ?", (link,))
-    return cursor.fetchone() is not None
-
-
 def _skip_reason(job: dict, workplaces: list[str], ignore_foreign: bool,
                  check: Callable[[str, str], tuple[bool, str]]) -> str:
     """Why the job is not sent, or "" when it passes every filter."""
@@ -104,7 +101,7 @@ def _skip_reason(job: dict, workplaces: list[str], ignore_foreign: bool,
     return reason if blocked else ""
 
 
-def search_jobs(conn, cursor, *, filters: list[dict], max_age_days: int, ignore_foreign: bool,
+def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, ignore_foreign: bool,
                 user_agent: str, send: Callable, check: Callable[[str, str], tuple[bool, str]],
                 errors: list[str] | None = None, now: datetime | None = None) -> None:
     """Run every filter and send the unseen jobs published in the last max_age_days.
@@ -113,7 +110,7 @@ def search_jobs(conn, cursor, *, filters: list[dict], max_age_days: int, ignore_
         (empty or missing = any).
     ignore_foreign: skip remote jobs from companies abroad (foreign currency salary or tag).
     check: main.filtros_basicos(title, company) -> (blocked, reason).
-    send: main.registrar_e_enviar(conn, cursor, link, title, company, date, message, source).
+    send: (db, link, title, company, date, message, source: Source) -> None; registers the job, the module never writes to db.
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
     errors = [] if errors is None else errors
@@ -161,11 +158,11 @@ def search_jobs(conn, cursor, *, filters: list[dict], max_age_days: int, ignore_
                     if reason:
                         print(f"   {reason}")
                         continue
-                    if _already_sent(cursor, job["link"]):
+                    if db.is_sent(job["link"]):
                         continue
                     sent += 1
-                    send(conn, cursor, job["link"], job["title"], job["company"],
-                         job["created_at"].strftime("%d/%m/%Y"), build_message(name, job), "REMOTAR")
+                    send(db, job["link"], job["title"], job["company"],
+                         job["created_at"].strftime("%d/%m/%Y"), build_message(name, job), Source.REMOTAR)
 
                 print(f"   📄 Página {page}: {len(jobs)} vagas, {sent} novas.")
                 # Newest first: when the page ends in an old job, the next pages are older still.

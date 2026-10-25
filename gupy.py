@@ -8,6 +8,8 @@ from datetime import datetime, timedelta
 
 import requests
 
+from store import Source, Store
+
 API_URL = "https://portal.gupy.io/api/job-search/jobs"
 SITE_URL = "https://portal.gupy.io"
 MAX_PAGES = 35
@@ -22,11 +24,6 @@ JOB_TYPES = {
     "vacancy_type_freelancer": "Freelancer",
 }
 BRAZIL_NAMES = {"brasil", "brazil", "br"}
-
-
-def _already_sent(cursor, link: str) -> bool:
-    cursor.execute("SELECT 1 FROM vagas_enviadas WHERE link = ?", (link,))
-    return cursor.fetchone() is not None
 
 
 def _published(job: dict) -> datetime | None:
@@ -61,14 +58,14 @@ def build_message(filter_name: str, job: dict, published: datetime | None) -> st
     )
 
 
-def search_jobs(conn, cursor, *, filters: list[dict], max_age_days: int, user_agent: str,
+def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, user_agent: str,
                 send: Callable, check: Callable[[str, str], tuple[bool, str]],
                 errors: list[str] | None = None) -> None:
     """Run every filter and send the unseen jobs published in the last max_age_days.
 
     filters: {"nome", "params"}; params go straight to the API (jobName, workplaceType, limit).
     check: main.filtros_basicos(title, company) -> (blocked, reason).
-    send: main.registrar_e_enviar(conn, cursor, link, title, company, date, message, source).
+    send: (db, link, title, company, date, message, source: Source) -> None; registers the job, the module never writes to db.
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
     """
     errors = [] if errors is None else errors
@@ -121,7 +118,7 @@ def search_jobs(conn, cursor, *, filters: list[dict], max_age_days: int, user_ag
                         print(f"   {reason}")
                         continue
 
-                    if _already_sent(cursor, link):
+                    if db.is_sent(link):
                         seen_in_a_row += 1
                         if seen_in_a_row >= MAX_SEEN_IN_A_ROW:
                             break
@@ -129,8 +126,8 @@ def search_jobs(conn, cursor, *, filters: list[dict], max_age_days: int, user_ag
 
                     seen_in_a_row = 0
                     date = published.strftime("%d/%m/%Y") if published else "Sem data"
-                    send(conn, cursor, link, title, company, date,
-                         build_message(name, job, published), "GUPY")
+                    send(db, link, title, company, date,
+                         build_message(name, job, published), Source.GUPY)
 
                 if seen_in_a_row >= MAX_SEEN_IN_A_ROW:
                     print("   🛑 Encerrando paginação.")

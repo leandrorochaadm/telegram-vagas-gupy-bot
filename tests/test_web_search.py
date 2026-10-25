@@ -10,9 +10,12 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import main  # noqa: E402
 import web_search  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Source, StoreError  # noqa: E402
 
 
 def hours_ago(n):
@@ -139,6 +142,10 @@ class SearchWebTest(unittest.TestCase):
         self.assertEqual(errors, ["código 429"])
 
 
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
+
+
+@unittest.skip(SQLITE_REMOVED)
 class SearchJobsTest(unittest.TestCase):
 
     def setUp(self):
@@ -229,6 +236,7 @@ class SearchJobsTest(unittest.TestCase):
 class MainWiringTest(unittest.TestCase):
     """main.py only passes settings; check it passes the web ones."""
 
+    @unittest.skip(SQLITE_REMOVED)
     def test_passes_web_settings(self):
         with mock.patch.object(main.web_search, "search_jobs") as search_jobs, \
              mock.patch.object(main, "anotar_avisos"), \
@@ -245,6 +253,73 @@ class MainWiringTest(unittest.TestCase):
         patterns = [web_search._word_pattern(g) for g in main.TERMOS_OBRIGATORIOS_WEB]
         for text in ["desenvolvedor flutter · remoto", "dev flutter home-office", "flutter homeoffice"]:
             self.assertTrue(all(p.search(text) for p in patterns), text)
+
+
+class SearchJobsWithStoreTest(unittest.TestCase):
+
+    LINK = "https://www.acme.com.br/carreiras/flutter-pleno"
+
+    def setUp(self):
+        self.db = FakeStore()
+        self.send = mock.Mock()
+
+    def run_with(self, db=None, api_key="key"):
+        pages = [web_search.parse_web_result(brave_result())]
+        with mock.patch.object(web_search, "search_web", return_value=pages):
+            web_search.search_jobs(
+                db or self.db,
+                api_key=api_key,
+                filters=[{"nome": "FLUTTER", "termo": "flutter vaga"}],
+                pages=1,
+                excluded_sites=["linkedin.com"],
+                required_terms=[["flutter"], ["vaga"], ["remoto", "remota"]],
+                ignored_companies=[],
+                send=self.send,
+            )
+
+    def test_sends_relevant_page_with_store_and_source(self):
+        self.run_with()
+        self.send.assert_called_once()
+        args = self.send.call_args.args
+        self.assertIs(args[0], self.db)
+        self.assertEqual(args[1], self.LINK)
+        self.assertIs(args[-1], Source.WEB)
+
+    def test_skips_marked_link(self):
+        self.db.mark_sent(self.LINK, "", "")
+        self.run_with()
+        self.send.assert_not_called()
+
+    def test_module_does_not_write_to_the_store(self):
+        self.run_with()
+        self.send.assert_called_once()
+        self.assertEqual(self.db.sent, {})
+
+    def test_store_error_propagates(self):
+        with self.assertRaises(StoreError):
+            self.run_with(db=FakeStore(fail_with=StoreError()))
+
+    def test_without_api_key_does_not_query_the_store(self):
+        self.run_with(db=FakeStore(fail_with=StoreError()), api_key="")
+        self.send.assert_not_called()
+
+
+class MainWiringStoreTest(unittest.TestCase):
+    """Same wiring check as MainWiringTest, with the store instead of the connection."""
+
+    def test_passes_web_settings(self):
+        db = FakeStore()
+        with mock.patch.object(main.web_search, "search_jobs") as search_jobs, \
+             mock.patch.object(main, "anotar_avisos"), \
+             mock.patch.object(main, "brave_due", return_value=True):
+            main.buscar_vagas_web(db)
+        self.assertIs(search_jobs.call_args.args[0], db)
+        kwargs = search_jobs.call_args.kwargs
+        self.assertIs(kwargs["required_terms"], main.TERMOS_OBRIGATORIOS_WEB)
+        self.assertIs(kwargs["filters"], main.FILTROS_WEB)
+        self.assertIs(kwargs["excluded_sites"], main.SITES_EXCLUIDOS_WEB)
+        self.assertIs(kwargs["blocked_terms"], main.TERMOS_BLOQUEADOS_WEB)
+        self.assertEqual(kwargs["max_age_days"], main.DIAS_WEB)
 
 
 if __name__ == "__main__":

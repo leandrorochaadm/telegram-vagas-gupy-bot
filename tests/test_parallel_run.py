@@ -2,6 +2,7 @@
 
 Run: python -m unittest discover -s tests -v
 """
+import io
 import os
 import shutil
 import sqlite3
@@ -11,8 +12,15 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import main  # noqa: E402
+from fake_store import FakeStore  # noqa: E402
+from store import Source, StoreError  # noqa: E402
+
+SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
+
+DB_COPIES_REMOVED = "db copies and --merge were removed: every job writes to the central database"
 
 SCHEMA = [
     "CREATE TABLE vagas_enviadas (link TEXT PRIMARY KEY, data_publicacao TEXT, titulo TEXT)",
@@ -77,6 +85,7 @@ class ParallelTestCase(unittest.TestCase):
         conn.close()
 
 
+@unittest.skip(DB_COPIES_REMOVED)
 class MergeDatabasesTest(ParallelTestCase):
     def test_sent_jobs_from_every_copy_are_kept_once(self):
         gupy = self.copy_of_base("gupy", ["INSERT INTO vagas_enviadas VALUES ('https://b', '02/10', 'B')"])
@@ -173,6 +182,7 @@ class MergeDatabasesTest(ParallelTestCase):
         self.assertEqual(self.rows("SELECT enviado_em FROM avisos_enviados"), [("2026-10-01T10:00:00+00:00",)])
 
 
+@unittest.skip(SQLITE_REMOVED)
 class MainModesTest(ParallelTestCase):
     def run_main(self, *argv, side_effects=None):
         """Run main.main(argv) with every source faked; (source fakes, enviar_avisos, enviar_telegram)."""
@@ -205,6 +215,7 @@ class MainModesTest(ParallelTestCase):
         self.assertIn(("LINKEDIN PUBLICAÇÕES", main.AVISO_FONTE_INTERROMPIDA),
                       self.rows("SELECT fonte, texto FROM avisos_pendentes"))
 
+    @unittest.skip(DB_COPIES_REMOVED)
     def test_merge_alerts_sources_without_a_copy(self):
         self.copy_of_base("gupy", ["INSERT INTO vagas_enviadas VALUES ('https://b', '02/10', 'B')"])
         _, send, _ = self.run_main("--merge", os.path.join(self.dir.name, "copias"))
@@ -240,6 +251,7 @@ def queued(link, title, company="Acme", source="GUPY"):
             f"'02/10', 'msg {link}', '{source}')")
 
 
+@unittest.skip(SQLITE_REMOVED)
 class JobQueueTest(MainModesTest):
     def setUp(self):
         super().setUp()
@@ -255,6 +267,7 @@ class JobQueueTest(MainModesTest):
         self.assertEqual(self.rows("SELECT link, mensagem FROM vagas_pendentes"), [("https://b", "msg")])
         self.assertNotIn(("https://b",), self.rows("SELECT link FROM vagas_enviadas"))
 
+    @unittest.skip(DB_COPIES_REMOVED)
     def test_merge_brings_the_queued_jobs_of_every_copy_dedicated_sites_first(self):
         self.write(self.base, [QUEUE_TABLE, queued("https://old", "Antiga")])
         self.copy_of_base("web", [queued("https://c", "C web", source="WEB"),
@@ -333,6 +346,226 @@ class JobQueueTest(MainModesTest):
         _, _, telegram = self.run_main()
         telegram.assert_called_once_with("msg https://b")
         self.assertEqual(self.rows("SELECT link FROM vagas_pendentes"), [])
+
+
+class NoDbCopiesTest(ParallelTestCase):
+    def test_merge_option_is_gone(self):
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+            main.parse_args(["--merge", "copias"])
+
+    def test_copy_merge_helpers_are_gone(self):
+        for name in ("merge_databases", "_merge_copy", "find_copies", "OWNED_TABLES", "SKIPPED_TABLES",
+                     "AVISO_FONTE_SEM_BANCO", "AVISO_COPIA_ESTRAGADA"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(main, name))
+
+    @unittest.skip(SQLITE_REMOVED)
+    def test_parallel_steps_store_alerts_and_send_alerts_sends(self):
+        cases = [(["--source", "gupy"], True), (["--failed", "gupy"], True), (["--send-jobs"], True),
+                 (["--send-alerts"], False)]
+        names = [name for name, _ in main.SOURCES.values()]
+        for argv, stores in cases:
+            with self.subTest(argv=argv):
+                conn = sqlite3.connect(self.base)
+                self.addCleanup(conn.close)
+                with mock.patch.multiple(main, TOKEN="t", CHAT_ID="c", **{n: mock.DEFAULT for n in names}), \
+                     mock.patch.object(main, "iniciar_banco", return_value=(conn, conn.cursor())), \
+                     mock.patch.object(main, "store_alerts") as store, \
+                     mock.patch.object(main, "enviar_avisos") as send, \
+                     mock.patch.object(main, "enviar_telegram", return_value=True):
+                    main.main(argv)
+                if stores:
+                    store.assert_called_once()
+                    send.assert_not_called()
+                else:
+                    send.assert_called_once()
+                    store.assert_not_called()
+
+
+class StoreModesTest(unittest.TestCase):
+    def setUp(self):
+        self.db = FakeStore()
+        self.db.mark_sent("https://a", "01/10", "A")
+        self.db.add_alerts([(Source.GUPY.api_value, "antigo")])
+        for state in (main._enviados_sessao, main._falhas_envio, main._avisos):
+            state.clear()
+            self.addCleanup(state.clear)
+        # main(["--source", ...]) turns queueing on for the module
+        self.addCleanup(setattr, main, "_queue_jobs", False)
+        patcher = mock.patch.object(main.time, "sleep")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def pending(self):
+        return [(alert.label, alert.text) for alert in self.db.pending_alerts()]
+
+    def run_main(self, *argv, side_effects=None, telegram=True):
+        """Run main.main(argv) with every source faked; (source fakes, enviar_avisos, enviar_telegram)."""
+        names = [name for name, _ in main.SOURCES.values()]
+        telegram_args = {"side_effect": telegram} if isinstance(telegram, list) else {"return_value": telegram}
+        with mock.patch.multiple(main, TOKEN="t", CHAT_ID="c", **{name: mock.DEFAULT for name in names}) as fakes, \
+             mock.patch.object(main, "from_env", return_value=self.db), \
+             mock.patch.object(main, "enviar_avisos") as send, \
+             mock.patch.object(main, "enviar_telegram", **telegram_args) as telegram_mock:
+            for name, effect in (side_effects or {}).items():
+                fakes[name].side_effect = effect
+            main.main(list(argv))
+        return fakes, send, telegram_mock
+
+    def queue(self, link, title, company="Acme", source=Source.GUPY):
+        self.db.queue_job(link, title, company, "02/10", f"msg {link}", source)
+
+    def test_connects_to_the_store(self):
+        self.run_main("--send-alerts")
+        self.assertTrue(self.db.connected)
+
+    def test_source_runs_only_that_source_and_saves_alerts_without_sending(self):
+        def gupy(db):
+            main.anotar_avisos(Source.GUPY, ["falhou"])
+        fakes, send, telegram = self.run_main("--source", "gupy", side_effects={"buscar_vagas_gupy": gupy})
+        fakes["buscar_vagas_gupy"].assert_called_once_with(self.db)
+        self.assertEqual([name for name, fake in fakes.items() if fake.called], ["buscar_vagas_gupy"])
+        send.assert_not_called()
+        telegram.assert_not_called()
+        self.assertEqual(self.pending(), [("gupy", "antigo"), ("gupy", "falhou")])
+
+    def test_failed_saves_an_interrupted_alert(self):
+        fakes, send, _ = self.run_main("--failed", "linkedin_posts")
+        self.assertFalse(any(fake.called for fake in fakes.values()))
+        send.assert_not_called()
+        self.assertIn((Source.LINKEDIN_POSTS.api_value, main.AVISO_FONTE_INTERROMPIDA), self.pending())
+
+    def test_send_alerts_only_sends(self):
+        fakes, send, _ = self.run_main("--send-alerts")
+        self.assertFalse(any(fake.called for fake in fakes.values()))
+        send.assert_called_once_with(self.db)
+
+    def test_no_arguments_runs_every_source_in_order_and_sends(self):
+        calls = []
+        names = [name for name, _ in main.SOURCES.values()]
+        effects = {name: (lambda db, name=name: calls.append(name)) for name in names}
+        _, send, _ = self.run_main(side_effects=effects)
+        self.assertEqual(calls, names)
+        self.assertEqual(calls[-1], "buscar_vagas_web")
+        send.assert_called_once_with(self.db)
+
+    def test_sources_follow_the_source_enum(self):
+        sources = Source.search_sources()
+        self.assertEqual(list(main.SOURCES), [source.api_value for source in sources])
+        for key, (function_name, source) in main.SOURCES.items():
+            with self.subTest(source=key):
+                self.assertIs(source, Source.from_api(key))
+                self.assertTrue(callable(getattr(main, function_name)))
+
+    def test_parallel_steps_store_alerts_and_send_alerts_sends(self):
+        cases = [(["--source", "gupy"], True), (["--failed", "gupy"], True), (["--send-jobs"], True),
+                 (["--send-alerts"], False)]
+        names = [name for name, _ in main.SOURCES.values()]
+        for argv, stores in cases:
+            with self.subTest(argv=argv):
+                with mock.patch.multiple(main, TOKEN="t", CHAT_ID="c", **{n: mock.DEFAULT for n in names}), \
+                     mock.patch.object(main, "from_env", return_value=self.db), \
+                     mock.patch.object(main, "store_alerts") as store, \
+                     mock.patch.object(main, "enviar_avisos") as send, \
+                     mock.patch.object(main, "enviar_telegram", return_value=True):
+                    main.main(argv)
+                if stores:
+                    store.assert_called_once_with(self.db)
+                    send.assert_not_called()
+                else:
+                    send.assert_called_once_with(self.db)
+                    store.assert_not_called()
+
+    def test_store_failure_on_connect_alerts_directly_and_runs_no_source(self):
+        self.db = FakeStore(fail_with=StoreError("down"))
+        fakes, send, telegram = self.run_main()
+        self.assertFalse(any(fake.called for fake in fakes.values()))
+        send.assert_not_called()
+        telegram.assert_called_once()
+        self.assertIn("down", telegram.call_args.args[0])
+
+    def test_from_env_failure_alerts_directly_and_runs_no_source(self):
+        names = [name for name, _ in main.SOURCES.values()]
+        with mock.patch.multiple(main, TOKEN="t", CHAT_ID="c", **{n: mock.DEFAULT for n in names}) as fakes, \
+             mock.patch.object(main, "from_env", side_effect=StoreError("no url")), \
+             mock.patch.object(main, "enviar_telegram", return_value=True) as telegram:
+            main.main([])
+        self.assertFalse(any(fake.called for fake in fakes.values()))
+        telegram.assert_called_once()
+        self.assertIn("no url", telegram.call_args.args[0])
+
+    def test_queue_failure_is_alerted_and_the_run_goes_on(self):
+        with mock.patch.object(main, "send_queued_jobs", side_effect=StoreError("queue down")):
+            _, send, _ = self.run_main()
+        send.assert_called_once_with(self.db)
+        self.assertEqual([source for source, _ in main._avisos], [Source.BOT])
+        self.assertIn("queue down", main._avisos[0][1])
+
+    def test_source_queues_jobs_without_sending(self):
+        def gupy(db):
+            main.registrar_e_enviar(db, "https://b", "Dev Flutter", "Acme", "02/10", "msg", Source.GUPY)
+        _, _, telegram = self.run_main("--source", "gupy", side_effects={"buscar_vagas_gupy": gupy})
+        telegram.assert_not_called()
+        self.assertEqual([(job.link, job.message, job.source) for job in self.db.queued_jobs()],
+                         [("https://b", "msg", Source.GUPY)])
+        self.assertFalse(self.db.is_sent("https://b"))
+
+    def test_send_jobs_sends_each_job_once_in_queue_order(self):
+        self.queue("https://gupy/1", "Dev Flutter")
+        self.queue("https://linkedin/1", "Dev Flutter", source=Source.LINKEDIN)  # same job, other site
+        self.queue("https://remotar/2", "Dev Mobile", source=Source.REMOTAR)
+        _, send, telegram = self.run_main("--send-jobs")
+        self.assertEqual([c.args[0] for c in telegram.call_args_list],
+                         ["msg https://gupy/1", "msg https://remotar/2"])
+        self.assertEqual(self.db.queued_jobs(), [])
+        self.assertLessEqual({"https://gupy/1", "https://linkedin/1", "https://remotar/2"}, set(self.db.sent))
+        send.assert_not_called()
+
+    def test_send_jobs_skips_a_job_already_sent(self):
+        self.queue("https://a", "A")
+        _, _, telegram = self.run_main("--send-jobs")
+        telegram.assert_not_called()
+        self.assertEqual(self.db.queued_jobs(), [])
+
+    def test_send_jobs_without_a_queue_does_nothing(self):
+        _, _, telegram = self.run_main("--send-jobs")
+        telegram.assert_not_called()
+
+    def test_refused_job_stays_queued_and_is_alerted(self):
+        self.queue("https://b", "Dev Flutter")
+        self.run_main("--send-jobs", telegram=False)
+        self.assertEqual([job.link for job in self.db.queued_jobs()], ["https://b"])
+        self.assertFalse(self.db.is_sent("https://b"))
+        self.assertIn(Source.TELEGRAM.api_value, [label for label, _ in self.pending()])
+
+    def test_same_link_found_twice_in_a_job_is_queued_once(self):
+        def gupy(db):
+            for _ in range(2):
+                main.registrar_e_enviar(db, "https://b", "Dev Flutter", "Acme", "02/10", "msg", Source.GUPY)
+        self.run_main("--source", "gupy", side_effects={"buscar_vagas_gupy": gupy})
+        self.assertEqual([job.link for job in self.db.queued_jobs()], ["https://b"])
+
+    def test_refused_job_does_not_stop_the_next_ones(self):
+        self.queue("https://b", "B")
+        self.queue("https://c", "C")
+        _, _, telegram = self.run_main("--send-jobs", telegram=[False, True])
+        self.assertEqual(telegram.call_count, 2)
+        self.assertEqual([job.link for job in self.db.queued_jobs()], ["https://b"])
+        self.assertTrue(self.db.is_sent("https://c"))
+
+    def test_run_after_a_source_run_sends_directly_again(self):
+        self.run_main("--source", "gupy")
+        def gupy(db):
+            main.registrar_e_enviar(db, "https://b", "Dev Flutter", "Acme", "02/10", "msg", Source.GUPY)
+        _, _, telegram = self.run_main(side_effects={"buscar_vagas_gupy": gupy})
+        telegram.assert_called_once_with("msg")
+        self.assertTrue(self.db.is_sent("https://b"))
+
+    def test_full_run_also_sends_what_was_left_queued(self):
+        self.queue("https://b", "B")
+        _, _, telegram = self.run_main()
+        telegram.assert_called_once_with("msg https://b")
+        self.assertEqual(self.db.queued_jobs(), [])
 
 
 if __name__ == "__main__":
