@@ -75,6 +75,18 @@ echo "$@" > "$FAKE_STATE/python"
 exit "${FAKE_EXIT:-0}"
 """
 
+# Logs one line per call ("launch" for `python -c`); the browser launch fails
+# FAKE_LAUNCH_FAILS times before it works
+FAKE_PLAYWRIGHT_PYTHON = """#!/usr/bin/env bash
+if [ "$1" = "-c" ]; then
+  echo launch >> "$FAKE_STATE/calls"
+  fails=$(cat "$FAKE_STATE/fails" 2>/dev/null || echo "${FAKE_LAUNCH_FAILS:-0}")
+  [ "$fails" -gt 0 ] && { echo $((fails - 1)) > "$FAKE_STATE/fails"; exit 1; }
+  exit 0
+fi
+echo "$@" >> "$FAKE_STATE/calls"
+"""
+
 
 class SearchDeadlineTest(unittest.TestCase):
     def setUp(self):
@@ -196,45 +208,54 @@ class DependencyCacheTest(unittest.TestCase):
 
     def test_playwright_browser_is_cached_by_requirements_hash(self):
         step = step_block("buscar-vagas", self.RESTORE)
-        for text in ("id: playwright-cache", "uses: actions/cache/restore@v4", "continue-on-error: true",
+        for text in ("id: playwright-cache", "uses: actions/cache/restore@v6", "continue-on-error: true",
                      "path: ~/.cache/ms-playwright", "hashFiles('requirements.txt')", self.PLAYWRIGHT_IF):
             self.assertIn(text, step)
         self.assertIn(self.PLAYWRIGHT_IF, step_block("buscar-vagas", self.INSTALL))
         names = step_names("buscar-vagas")
         self.assertEqual(names.index(self.RESTORE) + 1, names.index(self.INSTALL))
 
-    def run_install(self, cache_hit: str) -> tuple[subprocess.CompletedProcess, str]:
+    def run_install(self, cache_hit: str, launch_fails: int = 0) -> tuple[subprocess.CompletedProcess, list[str]]:
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = os.path.join(tmp, "bin")
             os.makedirs(bin_dir)
             path = os.path.join(bin_dir, "python")
             with open(path, "w") as f:
-                f.write(FAKE_PYTHON)
+                f.write(FAKE_PLAYWRIGHT_PYTHON)
             os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
             env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", FAKE_STATE=tmp,
-                       PLAYWRIGHT_CACHE_HIT=cache_hit)
+                       PLAYWRIGHT_CACHE_HIT=cache_hit, FAKE_LAUNCH_FAILS=str(launch_fails))
             result = subprocess.run(["bash", "-e", "-c", run_script(self.INSTALL)],
                                     env=env, capture_output=True, text=True)
-            with open(os.path.join(tmp, "python")) as f:
-                return result, f.read().strip()
+            with open(os.path.join(tmp, "calls")) as f:
+                return result, f.read().splitlines()
 
     def test_playwright_install_skips_download_on_cache_hit(self):
         step = step_block("buscar-vagas", self.INSTALL)
         for text in ("id: playwright-install", "continue-on-error: true", "timeout-minutes: 5",
                      "PLAYWRIGHT_CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}"):
             self.assertIn(text, step)
-        for cache_hit, expected in (("true", "-m playwright install-deps chromium"),
-                                    ("false", "-m playwright install --with-deps chromium"),
-                                    ("", "-m playwright install --with-deps chromium")):
-            result, called = self.run_install(cache_hit)
+        for cache_hit, expected in (("true", ["launch"]),
+                                    ("false", ["-m playwright install chromium", "launch"]),
+                                    ("", ["-m playwright install chromium", "launch"])):
+            result, calls = self.run_install(cache_hit)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(called, expected)
+            self.assertEqual(calls, expected)
+
+    def test_playwright_system_deps_only_when_the_browser_does_not_launch(self):
+        # The apt mirror can take minutes to serve fonts: install-deps is the fallback, not the default
+        result, calls = self.run_install("true", launch_fails=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, ["launch", "-m playwright install-deps chromium", "launch"])
+        result, calls = self.run_install("true", launch_fails=2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, ["launch", "-m playwright install-deps chromium", "launch"])
 
     def test_playwright_cache_is_saved_only_after_successful_install(self):
         names = step_names("buscar-vagas")
         self.assertEqual(names.index(self.INSTALL) + 1, names.index(self.SAVE))
         step = step_block("buscar-vagas", self.SAVE)
-        for text in ("uses: actions/cache/save@v4", "continue-on-error: true",
+        for text in ("uses: actions/cache/save@v6", "continue-on-error: true",
                      "steps.playwright-install.outcome == 'success'",
                      "steps.playwright-cache.outputs.cache-hit != 'true'", "matrix.source == 'linkedin_posts'"):
             self.assertIn(text, step)
@@ -243,7 +264,7 @@ class DependencyCacheTest(unittest.TestCase):
             self.assertEqual(self.lines_with(step, prefix), self.lines_with(restore, prefix))
         for name in step_names("buscar-vagas"):
             block = step_block("buscar-vagas", name)
-            if "uses: actions/cache@v4" in block:
+            if "uses: actions/cache@v6" in block:
                 self.assertNotIn("ms-playwright", block)
 
 
