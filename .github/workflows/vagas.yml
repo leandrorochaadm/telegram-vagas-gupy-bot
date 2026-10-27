@@ -54,7 +54,7 @@ jobs:
         id: playwright-cache
         if: matrix.source == 'linkedin_posts' && env.HAS_LINKEDIN_LI_AT == 'true'
         continue-on-error: true
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
@@ -69,19 +69,21 @@ jobs:
         timeout-minutes: 5
         env:
           PLAYWRIGHT_CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}
+        # The runner image already ships the libs Chromium needs; install-deps only adds optional
+        # fonts, and the Azure apt mirror sometimes takes minutes to serve them (step timed out).
+        # So apt runs only when the browser fails to launch.
         run: |
-          if [ "$PLAYWRIGHT_CACHE_HIT" = 'true' ]; then
-            python -m playwright install-deps chromium
-          else
-            python -m playwright install --with-deps chromium
-          fi
+          [ "$PLAYWRIGHT_CACHE_HIT" = 'true' ] || python -m playwright install chromium
+          launch='from playwright.sync_api import sync_playwright
+          with sync_playwright() as p: p.chromium.launch().close()'
+          python -c "$launch" || { python -m playwright install-deps chromium && python -c "$launch"; }
 
       # Saved only after a full install that succeeded (a half-downloaded folder never gets cached).
-      # actions/cache@v4 would save at job end even when the install failed, hence restore + save.
+      # actions/cache@v6 would save at job end even when the install failed, hence restore + save.
       - name: Guardar navegador do Playwright
         if: matrix.source == 'linkedin_posts' && env.HAS_LINKEDIN_LI_AT == 'true' && steps.playwright-cache.outputs.cache-hit != 'true' && steps.playwright-install.outcome == 'success'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
@@ -90,7 +92,7 @@ jobs:
       # (Cloudflare rate-limits registrations). Bump the key to force a fresh account.
       - name: Restaurar conta WARP
         if: matrix.source == 'programathor'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.wgcf
           key: wgcf-account-v1
