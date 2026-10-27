@@ -210,7 +210,7 @@ def search_posts(li_at: str, query: str, scrolls: int = 2, user_agent: str | Non
             page.on("response", lambda response: _keep_payload(response, payloads))
             try:
                 return _read_results(page, context, build_search_url(query, period), scrolls,
-                                     PlaywrightTimeout, payloads)
+                                     PlaywrightTimeout, payloads, PlaywrightError)
             except PlaywrightError as error:
                 if REDIRECT_LOOP_ERROR in str(error):
                     raise LoginExpired(REDIRECT_LOOP_ERROR) from None
@@ -236,7 +236,7 @@ def _keep_payload(response, payloads: list[str]) -> None:
 
 
 def _read_results(page, context, url: str, scrolls: int, timeout_error: type[Exception],
-                  payloads: list[str]) -> list[dict]:
+                  payloads: list[str], action_error: type[Exception]) -> list[dict]:
     response = page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
     # Login first: a redirect to the login page may also come with an odd status
     _check_session(page, context)
@@ -254,7 +254,13 @@ def _read_results(page, context, url: str, scrolls: int, timeout_error: type[Exc
     for _ in range(scrolls):
         if not cards.count():
             break
-        cards.last.scroll_into_view_if_needed()
+        try:
+            cards.last.scroll_into_view_if_needed()
+        except action_error:
+            # LinkedIn re-rendered the list while scrolling ("not attached to the DOM"):
+            # the locator finds the new last card on the next try, and the posts
+            # already loaded are kept either way
+            pass
         page.wait_for_timeout(SCROLL_WAIT_MS)
     _check_session(page, context)
     return parse_posts(page.content(), payloads)

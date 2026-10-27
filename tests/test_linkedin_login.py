@@ -252,6 +252,16 @@ class SearchPostsTest(unittest.TestCase):
         self.assertIn("update-card-focus", self.page.locator_selector)
         self.assertEqual(self.page.cards.last.scroll_into_view_if_needed.call_count, 2)
 
+    def test_card_detached_while_scrolling_keeps_the_posts(self):
+        # LinkedIn re-renders the list: the first scroll fails, the next one finds the new last card
+        modules, page, _context, _browser = fake_playwright(html=post_html())
+        page.cards.last.scroll_into_view_if_needed.side_effect = [
+            FakeError("Locator.scroll_into_view_if_needed: Element is not attached to the DOM"), None]
+        with mock.patch.dict(sys.modules, modules):
+            posts = linkedin_login.search_posts(COOKIE, "flutter vaga", scrolls=2)
+        self.assertEqual([p["link"] for p in posts], [LINK])
+        self.assertEqual(page.cards.last.scroll_into_view_if_needed.call_count, 2)
+
     def test_no_scroll_without_cards(self):
         self.search(html="<h2>Nenhum resultado encontrado</h2>", cards=0)
         self.page.cards.last.scroll_into_view_if_needed.assert_not_called()
