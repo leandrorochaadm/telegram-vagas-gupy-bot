@@ -249,6 +249,9 @@ class MainWiringTest(unittest.TestCase):
         self.assertIs(kwargs["blocked_terms"], main.TERMOS_BLOQUEADOS_WEB)
         self.assertEqual(kwargs["max_age_days"], main.DIAS_WEB)
 
+    def test_github_is_left_out_of_web_search(self):
+        self.assertIn("github.com", main.SITES_EXCLUIDOS_WEB)
+
     def test_web_rule_accepts_job_without_vaga_word(self):
         patterns = [web_search._word_pattern(g) for g in main.TERMOS_OBRIGATORIOS_WEB]
         for text in ["desenvolvedor flutter · remoto", "dev flutter home-office", "flutter homeoffice"]:

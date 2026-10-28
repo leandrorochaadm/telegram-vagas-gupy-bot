@@ -142,7 +142,8 @@ FILTROS_WEB = [
 PAGINAS_WEB = 1
 # Domínios fora da busca na web (subdomínios inclusos). LinkedIn e Remotar já têm
 # busca própria, então ficariam repetidos (o link da web é outro e passaria como vaga nova).
-SITES_EXCLUIDOS_WEB = ["linkedin.com", "remotar.com.br"]
+# GitHub: só traz repositórios e listas de vagas, não a vaga em si.
+SITES_EXCLUIDOS_WEB = ["linkedin.com", "remotar.com.br", "github.com"]
 # Mesma regra de TERMOS_OBRIGATORIOS_POSTS, sem exigir "vaga": páginas de vaga
 # costumam ter só o cargo no título ("Desenvolvedor Flutter · Remoto").
 TERMOS_OBRIGATORIOS_WEB = [
