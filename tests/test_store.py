@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import store  # noqa: E402
 
 BRASILIA = timezone(timedelta(hours=-3))
+ATTEMPTS = len(store.RETRY_DELAYS_S) + 1
 
 
 def response(status, body=None, *, json_error=False):
@@ -65,7 +66,7 @@ class ConnectTest(StoreTestCase):
         self.assertNotIn("Authorization", first.kwargs["headers"])
         self.db.is_sent("x")
         self.assertEqual(self.call(1).kwargs["headers"]["Authorization"], "tok")
-        self.assertEqual(self.call(1).kwargs["timeout"], 15)
+        self.assertEqual(self.call(1).kwargs["timeout"], (store.CONNECT_TIMEOUT_S, store.READ_TIMEOUT_S))
 
     def test_connect_400_raises_login_refused(self):
         self.reply(response(400, {"message": "Failed to authenticate."}))
@@ -74,6 +75,11 @@ class ConnectTest(StoreTestCase):
         self.assertEqual(ctx.exception.kind, store.StoreFailure.LOGIN_REFUSED)
         self.assertEqual(str(ctx.exception), store.MSG_LOGIN_REFUSED)
         self.assertEqual(len(self.calls), 1)
+
+    def test_connect_502_then_200_retries(self):
+        self.reply(response(502), response(200, {"token": "tok", "record": {}}))
+        self.db.connect()
+        self.assertEqual(len(self.calls), 2)
 
 
 class TransportTest(StoreTestCase):
@@ -91,32 +97,54 @@ class TransportTest(StoreTestCase):
         self.reply(response(502), response(200, page([])))
         self.assertFalse(self.db.is_sent("x"))
         self.assertEqual(len(self.calls), 2)
-        self.sleep.assert_called_once_with(2)
+        self.sleep.assert_called_once_with(store.RETRY_DELAYS_S[0])
 
-    def test_502_twice_raises_unavailable(self):
-        self.reply(response(502), response(502))
+    def test_502_on_every_attempt_raises_unavailable(self):
+        self.reply(*[response(502) for _ in range(ATTEMPTS)])
         with self.assertRaises(store.StoreError) as ctx:
             self.db.is_sent("x")
         self.assertEqual(ctx.exception.kind, store.StoreFailure.UNAVAILABLE)
         self.assertEqual(str(ctx.exception), store.MSG_UNAVAILABLE)
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.calls), ATTEMPTS)
+        self.assertEqual(self.sleep.call_args_list, [mock.call(d) for d in store.RETRY_DELAYS_S])
 
     def test_timeout_then_ok_retries(self):
         self.reply(requests.Timeout(), response(200, page([])))
         self.assertFalse(self.db.is_sent("x"))
         self.assertEqual(len(self.calls), 2)
 
-    def test_timeout_twice_raises_unavailable(self):
-        self.reply(requests.Timeout(), requests.Timeout())
+    def test_connect_timeout_until_last_attempt_succeeds(self):
+        self.reply(*[requests.ConnectTimeout() for _ in range(ATTEMPTS - 1)], response(200, page([])))
+        self.assertFalse(self.db.is_sent("x"))
+        self.assertEqual(len(self.calls), ATTEMPTS)
+
+    def test_timeout_on_every_attempt_raises_unavailable(self):
+        self.reply(*[requests.Timeout() for _ in range(ATTEMPTS)])
+        with self.assertRaises(store.StoreError) as ctx:
+            self.db.is_sent("x")
+        self.assertEqual(ctx.exception.kind, store.StoreFailure.UNAVAILABLE)
+        self.assertEqual(len(self.calls), ATTEMPTS)
+
+    def test_connection_error_on_every_attempt_raises_unavailable(self):
+        self.reply(*[requests.ConnectionError() for _ in range(ATTEMPTS)])
         with self.assertRaises(store.StoreError) as ctx:
             self.db.is_sent("x")
         self.assertEqual(ctx.exception.kind, store.StoreFailure.UNAVAILABLE)
 
-    def test_connection_error_twice_raises_unavailable(self):
-        self.reply(requests.ConnectionError(), requests.ConnectionError())
-        with self.assertRaises(store.StoreError) as ctx:
-            self.db.is_sent("x")
-        self.assertEqual(ctx.exception.kind, store.StoreFailure.UNAVAILABLE)
+    def test_post_is_not_repeated_after_502_or_read_timeout(self):
+        for failure in (response(502), requests.ReadTimeout(), requests.ConnectionError()):
+            with self.subTest(failure=failure):
+                self.session.request.reset_mock()
+                self.reply(failure)
+                with self.assertRaises(store.StoreError) as ctx:
+                    self.db.add_alerts([("BOT", "x")])
+                self.assertEqual(ctx.exception.kind, store.StoreFailure.UNAVAILABLE)
+                self.assertEqual(len(self.calls), 1)
+
+    def test_post_is_repeated_when_connection_never_opened(self):
+        self.reply(requests.ConnectTimeout(), response(200, {}))
+        self.db.add_alerts([("BOT", "x")])
+        self.assertEqual(len(self.calls), 2)
 
     def test_other_4xx_raises_rejected(self):
         self.reply(response(400, {"data": {"link": {"code": "validation_required"}}}))
@@ -140,7 +168,7 @@ class TransportTest(StoreTestCase):
         self.assertEqual(len(self.calls), 1)
 
     def test_error_log_does_not_leak_secrets(self):
-        self.reply(response(502), response(502))
+        self.reply(*[response(502) for _ in range(ATTEMPTS)])
         with mock.patch("builtins.print") as printed:
             with self.assertRaises(store.StoreError):
                 self.db.is_sent("x")

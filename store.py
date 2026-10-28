@@ -11,8 +11,11 @@ ENV_URL = "PB_URL"
 ENV_BOT_EMAIL = "PB_BOT_EMAIL"
 ENV_BOT_PASSWORD = "PB_BOT_PASSWORD"
 
-REQUEST_TIMEOUT_S = 15
-RETRY_DELAY_S = 2
+# Slightly over a multiple of 3 s, the TCP retransmission window (requests docs, "Timeouts")
+CONNECT_TIMEOUT_S = 6.05
+READ_TIMEOUT_S = 15
+# Pause before each new attempt: a network blip between the runner and the VPS can last ~30 s
+RETRY_DELAYS_S = (2, 5, 10)
 PAGE_SIZE = 500
 
 MSG_UNAVAILABLE = "o banco de vagas não respondeu"
@@ -197,7 +200,7 @@ class Store:
     def connect(self) -> None:
         path = _AUTH_PATH.format(collection=Collection.BOT_ACCOUNTS)
         try:
-            body = self._request("POST", path, auth=False,
+            body = self._request("POST", path, auth=False, safe_to_repeat=True,
                                  json={"identity": self._email, "password": self._password})
         except StoreError as error:
             if error.kind is StoreFailure.REJECTED:
@@ -362,28 +365,32 @@ class Store:
         return error
 
     def _request(self, method: str, path: str, *, params: dict | None = None,
-                 json: dict | None = None, auth: bool = True) -> dict | None:
+                 json: dict | None = None, auth: bool = True,
+                 safe_to_repeat: bool = False) -> dict | None:
         headers = {}
         if auth and self._token:
             headers["Authorization"] = self._token
+        # A POST may have been saved even if the reply was lost: repeating it could
+        # duplicate the row, so it is only repeated when the connection never opened
+        safe_to_repeat = safe_to_repeat or method != "POST"
         response = None
-        for attempt in range(2):
-            last = attempt == 1
+        for attempt in range(len(RETRY_DELAYS_S) + 1):
+            last = attempt == len(RETRY_DELAYS_S)
             try:
                 response = self._session.request(
                     method, self._url + path, params=params, json=json,
-                    headers=headers, timeout=REQUEST_TIMEOUT_S)
+                    headers=headers, timeout=(CONNECT_TIMEOUT_S, READ_TIMEOUT_S))
             except requests.RequestException as error:
-                if last:
+                if last or not (safe_to_repeat or isinstance(error, requests.ConnectTimeout)):
                     raise self._fail(method, path, type(error).__name__, MSG_UNAVAILABLE,
                                      StoreFailure.UNAVAILABLE, error) from error
-                time.sleep(RETRY_DELAY_S)
+                time.sleep(RETRY_DELAYS_S[attempt])
                 continue
             if response.status_code >= _HTTP_SERVER_ERROR:
-                if last:
+                if last or not safe_to_repeat:
                     raise self._fail(method, path, response.status_code, MSG_UNAVAILABLE,
                                      StoreFailure.UNAVAILABLE)
-                time.sleep(RETRY_DELAY_S)
+                time.sleep(RETRY_DELAYS_S[attempt])
                 continue
             break
 
