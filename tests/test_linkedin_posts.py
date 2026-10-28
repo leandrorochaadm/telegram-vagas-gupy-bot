@@ -103,6 +103,13 @@ class SearchPostsTest(unittest.TestCase):
 
     @mock.patch("linkedin_posts.time.sleep")
     @mock.patch("linkedin_posts.requests.get")
+    def test_excluded_terms_go_into_query(self, get, _sleep):
+        get.return_value = brave_response([])
+        linkedin_posts.search_posts("key", "flutter OR dart", excluded_terms=["netvagas"])
+        self.assertEqual(get.call_args.kwargs["params"]["q"], "site:linkedin.com/posts -netvagas flutter OR dart")
+
+    @mock.patch("linkedin_posts.time.sleep")
+    @mock.patch("linkedin_posts.requests.get")
     def test_pages_while_more_results(self, get, _sleep):
         get.side_effect = [brave_response([brave_result()], more=True),
                            brave_response([brave_result(url="https://www.linkedin.com/posts/x-2")])]
@@ -266,6 +273,27 @@ class BuscarPostsLinkedinStoreTest(unittest.TestCase):
              mock.patch.object(main.linkedin_posts, "search_posts") as search:
             main.buscar_posts_linkedin(self.db)
         search.assert_not_called()
+
+    def test_skips_post_by_netvagas_author(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(
+            title="NetVagas Brasil on LinkedIn: vaga Flutter", description="Trabalho remoto"))])
+        main.enviar_telegram.assert_not_called()
+
+    def test_skips_post_mentioning_netvagas(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(
+            description="Vaga remota Flutter. Candidate-se em netvagas.com.br"))])
+        main.enviar_telegram.assert_not_called()
+
+    def test_skips_netvagas_post_found_only_by_link(self):
+        self.run_with([linkedin_posts.parse_result(brave_result(
+            title="Vaga Flutter remota",
+            url="https://br.linkedin.com/posts/netvagas_flutter-activity-456"))])
+        main.enviar_telegram.assert_not_called()
+
+    def test_brave_search_excludes_blocked_terms(self):
+        with mock.patch.object(main.linkedin_posts, "search_posts", return_value=[]) as search:
+            main.buscar_posts_linkedin(self.db)
+        self.assertIs(search.call_args.kwargs["excluded_terms"], main.TERMOS_BLOQUEADOS_POSTS)
 
     def test_queued_post_keeps_the_posts_source(self):
         with mock.patch.object(main, "_queue_jobs", True):

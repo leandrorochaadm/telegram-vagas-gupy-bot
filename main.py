@@ -171,6 +171,11 @@ TERMOS_OBRIGATORIOS_POSTS = [
     ["vaga", "vagas"],
     ["remoto", "remota"],
 ]
+# A publicação é descartada se o texto, o autor ou o link tiver um destes termos
+# (parcial, case-insensitive): "netvagas" também pega "NetVagas Brasil" e o
+# link "/posts/netvagas_..." quando a Brave não traz o nome do autor. Na Brave os
+# termos também vão na busca ("-netvagas"), para não ocuparem os resultados.
+TERMOS_BLOQUEADOS_POSTS = ["netvagas"]
 
 # Inhire: busca por termo no título. Só entram vagas remotas.
 # As empresas ficam na tabela inhire_tenants do banco (ver descoberta abaixo).
@@ -298,6 +303,11 @@ _RE_POSTS      = [_padrao_termos(grupo) for grupo in TERMOS_OBRIGATORIOS_POSTS]
 def post_relevante(texto):
     t = texto.lower()
     return all(padrao.search(t) for padrao in _RE_POSTS)
+
+def post_bloqueado(texto, autor, link):
+    """Retorna o termo de TERMOS_BLOQUEADOS_POSTS achado no texto, no autor ou no link, ou None."""
+    alvo = f"{texto} {autor} {link}".lower()
+    return next((termo for termo in TERMOS_BLOQUEADOS_POSTS if termo.lower() in alvo), None)
 
 def titulo_relevante(titulo):
     return _RE_TITULO.search(titulo.lower()) is not None
@@ -751,7 +761,7 @@ def _posts_pela_brave(db, erros):
         falhas_brave = []
         try:
             posts = linkedin_posts.search_posts(BRAVE_API_KEY, filtro["termo"], PAGINAS_POSTS_LINKEDIN,
-                                                errors=falhas_brave)
+                                                errors=falhas_brave, excluded_terms=TERMOS_BLOQUEADOS_POSTS)
         except Exception as e:
             print(f"   ⚠️  Erro: {e}")
             erros.append(descrever_falha(filtro['nome'], e))
@@ -766,6 +776,10 @@ def _enviar_posts_linkedin(db, filtro, posts):
 
         if not post_relevante(texto):
             print(f"   🚫 Sem flutter + vaga(s) + remoto/remota: {texto[:55]}")
+            continue
+
+        if termo := post_bloqueado(texto, autor, link):
+            print(f"   🚫 Termo bloqueado \"{termo}\": {autor[:50]}")
             continue
 
         bloqueada, motivo = filtros_basicos(texto, autor)

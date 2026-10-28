@@ -67,17 +67,23 @@ def parse_result(result: dict, now: datetime | None = None) -> dict | None:
     }
 
 
-def search_posts(api_key: str, query: str, pages: int = 1, errors: list[str] | None = None) -> list[dict]:
+def build_query(query: str, excluded_terms: list[str] = ()) -> str:
+    # site: and exclusions first, so an OR inside the query can't split them off one side
+    return " ".join(["site:linkedin.com/posts", *(f"-{term}" for term in excluded_terms), query])
+
+
+def search_posts(api_key: str, query: str, pages: int = 1, errors: list[str] | None = None,
+                 excluded_terms: list[str] = ()) -> list[dict]:
     """Search LinkedIn posts from the past 24h matching `query`.
 
+    `excluded_terms` go into the query as `-term`, so their posts don't take result slots.
     When Brave refuses a page, the reason ("código 429") is appended to `errors`.
     """
     headers = {"Accept": "application/json", "X-Subscription-Token": api_key}
     posts: list[dict] = []
     for offset in range(min(pages, MAX_OFFSET + 1)):
         params = {
-            # site: first, so an OR inside the query can't split it off one side
-            "q": f"site:linkedin.com/posts {query}",
+            "q": build_query(query, excluded_terms),
             "count": RESULTS_PER_PAGE,
             "offset": offset,
             "freshness": "pd",  # past day
