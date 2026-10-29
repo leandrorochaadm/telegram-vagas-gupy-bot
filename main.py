@@ -18,7 +18,7 @@ import linkedin_posts
 import programathor
 import remotar
 import web_search
-from store import Source, Store, StoreError, from_env
+from store import Source, Store, StoreError, StoreFailure, from_env
 
 try:
     from bs4 import BeautifulSoup
@@ -1136,6 +1136,8 @@ SOURCES = {s.api_value: (SOURCE_FUNCTIONS[s], s) for s in Source.search_sources(
 BS4_SOURCES = {Source.LINKEDIN.api_value}
 
 AVISO_FONTE_INTERROMPIDA = "A busca parou antes do fim (travou ou deu erro). Os outros sites não foram afetados."
+# EX_TEMPFAIL (sysexits.h): the workflow runs the source again on another runner
+EXIT_STORE_UNREACHABLE = 75
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Busca vagas e envia ao grupo do Telegram.")
@@ -1144,6 +1146,8 @@ def parse_args(argv):
     mode.add_argument("--failed", choices=SOURCES, help="anota que a fonte parou antes do fim")
     mode.add_argument("--send-jobs", action="store_true", help="envia as vagas guardadas pelos jobs")
     mode.add_argument("--send-alerts", action="store_true", help="envia os avisos guardados")
+    parser.add_argument("--defer-unreachable", action="store_true",
+                        help="banco fora do ar: sai com código 75, sem avisar, para outra máquina tentar")
     return parser.parse_args(argv)
 
 def main(argv=()):
@@ -1160,6 +1164,10 @@ def main(argv=()):
         db.connect()
     except Exception as e:
         print(f"❌ Erro ao abrir o banco: {e}")
+        # Some runners cannot reach the VPS for minutes while others can: the workflow
+        # retries on a fresh runner, and that one alerts if it fails too
+        if args.defer_unreachable and isinstance(e, StoreError) and e.kind == StoreFailure.UNAVAILABLE:
+            sys.exit(EXIT_STORE_UNREACHABLE)
         # Sem banco não dá para guardar o aviso: vai direto
         enviar_telegram(montar_aviso([(Source.BOT, f"Não foi possível abrir o banco de vagas, nenhuma busca foi feita: {e}")]))
         return

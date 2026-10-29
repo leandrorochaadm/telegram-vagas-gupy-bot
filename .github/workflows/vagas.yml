@@ -30,8 +30,11 @@ jobs:
         source: [gupy, linkedin, linkedin_posts, inhire, solides, remotar, web]
     env:
       HAS_LINKEDIN_LI_AT: ${{ secrets.LINKEDIN_LI_AT != '' }}
+      # A runner that cannot reach the database leaves its source to repetir-vagas, unalerted
+      DEFER_UNREACHABLE: 'true'
 
-    steps:
+    # Shared with repetir-vagas (YAML anchor)
+    steps: &search-steps
       # The 15 min window counts from here, setup included
       - name: Marcar início
         run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
@@ -160,10 +163,19 @@ jobs:
         # Search until 14 min after the job start, so the sending job starts ~15 min
         # after the run. Jobs are queued in the database as they are
         # found: a search cut short still has the ones it found sent.
+        # Exit 75 (only with DEFER_UNREACHABLE): this runner did not reach the database.
         run: |
           remaining=$(( JOB_START + 14 * 60 - $(date +%s) ))
           [ "$remaining" -gt 0 ] || { echo "No time left after setup"; exit 1; }
-          timeout "$remaining" python main.py --source ${{ matrix.source }}
+          status=0
+          timeout "$remaining" python main.py --source ${{ matrix.source }} ${DEFER_UNREACHABLE:+--defer-unreachable} || status=$?
+          if [ "$status" -eq 75 ]; then echo "unreachable=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          exit "$status"
+
+      # planejar-repeticao looks for this step by name to pick the sources to run again
+      - name: Banco inacessível
+        if: steps.run.outputs.unreachable == 'true'
+        run: echo "This runner did not reach the database; another runner will search ${{ matrix.source }}"
 
       # Hung (timeout), crashed or never started (setup failed): the final alert says this site stopped early
       - name: Anotar busca interrompida
@@ -176,9 +188,46 @@ jobs:
           PB_BOT_PASSWORD: ${{ secrets.PB_BOT_PASSWORD }}
         run: python main.py --failed ${{ matrix.source }}
 
+  # Sources whose runner did not reach the database ("Banco inacessível" ran), as a JSON list
+  planejar-repeticao:
+    needs: buscar-vagas
+    # Not success(): a search job that hung or failed must not stop the others' retry
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      sources: ${{ steps.plan.outputs.sources }}
+    steps:
+      - name: Listar fontes sem banco
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sources=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.name | startswith("buscar-vagas ("))
+                   | select(any(.steps[]; .name == "Banco inacessível" and .conclusion == "success"))
+                   | .name | ltrimstr("buscar-vagas (") | rtrimstr(")")]')
+          echo "sources=$sources" | tee -a "$GITHUB_OUTPUT"
+
+  # Same search on fresh runners, which usually reach the VPS: a failure here alerts as usual
+  repetir-vagas:
+    needs: planejar-repeticao
+    if: ${{ !cancelled() && needs.planejar-repeticao.outputs.sources != '' && needs.planejar-repeticao.outputs.sources != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        source: ${{ fromJSON(needs.planejar-repeticao.outputs.sources) }}
+    env:
+      HAS_LINKEDIN_LI_AT: ${{ secrets.LINKEDIN_LI_AT != '' }}
+    steps: *search-steps
+
   # Runs last: sends every queued job (the same job from two sites goes out once) and one alert for all sites
   finalizar:
-    needs: buscar-vagas
+    needs: [buscar-vagas, repetir-vagas]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 30

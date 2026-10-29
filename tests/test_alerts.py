@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import main  # noqa: E402
 from fake_store import FakeStore  # noqa: E402
-from store import Collection, Source, StoreError  # noqa: E402
+from store import Collection, Source, StoreError, StoreFailure  # noqa: E402
 
 SQLITE_REMOVED = "SQLite was replaced by the PocketBase store: the *StoreTest classes cover this"
 
@@ -574,6 +574,24 @@ class MainStoreTest(StoreAlertTestCase):
             mocks = self.run_main()
         mocks["buscar_vagas_gupy"].assert_not_called()
         self.assertIn("PocketBase is down", self.telegram.call_args.args[0])
+
+    def test_unreachable_database_is_left_to_another_runner_without_alert(self):
+        self.db.fail_with = StoreError("PocketBase is down")
+        # --source turns queueing on for the rest of the process
+        with mock.patch.object(main, "_queue_jobs", main._queue_jobs), \
+             mock.patch.object(main, "from_env", return_value=self.db), \
+             self.assertRaises(SystemExit) as exit_:
+            self.run_main(["--source", "gupy", "--defer-unreachable"])
+        self.assertEqual(exit_.exception.code, main.EXIT_STORE_UNREACHABLE)
+        self.telegram.assert_not_called()
+
+    def test_refused_login_is_alerted_even_when_deferring(self):
+        self.db.fail_with = StoreError("refused", StoreFailure.LOGIN_REFUSED)
+        with mock.patch.object(main, "_queue_jobs", main._queue_jobs), \
+             mock.patch.object(main, "from_env", return_value=self.db):
+            mocks = self.run_main(["--source", "gupy", "--defer-unreachable"])
+        mocks["buscar_vagas_gupy"].assert_not_called()
+        self.assertIn("refused", self.telegram.call_args.args[0])
 
     def test_missing_settings_stop_the_run(self):
         with mock.patch.object(main, "from_env", side_effect=StoreError("no URL")):

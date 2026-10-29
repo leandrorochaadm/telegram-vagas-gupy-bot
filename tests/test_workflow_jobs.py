@@ -100,12 +100,16 @@ class SearchDeadlineTest(unittest.TestCase):
                 f.write(body)
             os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
 
-    def run_step(self, elapsed: int, exit_code: int = 0) -> subprocess.CompletedProcess:
+    def run_step(self, elapsed: int, exit_code: int = 0, defer: bool = False) -> subprocess.CompletedProcess:
         env = dict(os.environ,
                    PATH=f"{self.bin}:{os.environ['PATH']}",
                    FAKE_STATE=self.dir.name,
                    FAKE_EXIT=str(exit_code),
+                   GITHUB_OUTPUT=os.path.join(self.dir.name, "output"),
                    JOB_START=str(int(time.time()) - elapsed))
+        env.pop("DEFER_UNREACHABLE", None)
+        if defer:
+            env["DEFER_UNREACHABLE"] = "true"
         # GitHub runs `run:` with bash -e
         return subprocess.run(["bash", "-e", "-c", run_script("Executar bot")],
                               env=env, capture_output=True, text=True)
@@ -133,6 +137,18 @@ class SearchDeadlineTest(unittest.TestCase):
         # 124: what timeout returns when it stops the command
         result = self.run_step(elapsed=60, exit_code=124)
         self.assertEqual(result.returncode, 124)
+        self.assertIsNone(self.state("output"))
+
+    def test_first_round_defers_an_unreachable_database_to_another_runner(self):
+        result = self.run_step(elapsed=60, exit_code=main.EXIT_STORE_UNREACHABLE, defer=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.state("python"), "main.py --source gupy --defer-unreachable")
+        self.assertEqual(self.state("output"), "unreachable=true")
+
+    def test_other_failures_still_fail_the_step_in_the_first_round(self):
+        result = self.run_step(elapsed=60, exit_code=1, defer=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIsNone(self.state("output"))
 
 
 class WorkflowLayoutTest(unittest.TestCase):
@@ -148,7 +164,7 @@ class WorkflowLayoutTest(unittest.TestCase):
         self.assertIn("python main.py --source ${{ matrix.source }}", job_block("buscar-vagas"))
         self.assertNotIn("--send-jobs", job_block("buscar-vagas"))
         last = job_block("finalizar")
-        self.assertIn("needs: buscar-vagas", last)
+        self.assertIn("needs: [buscar-vagas, repetir-vagas]", last)
         self.assertIn("if: always()", last)
         self.assertNotIn("--source", last)
 
@@ -188,6 +204,43 @@ class WorkflowLayoutTest(unittest.TestCase):
                      "overwrite: true"):
             self.assertIn(text, retry_step)
         self.assertNotIn("continue-on-error", retry_step)
+
+
+class RetryOnAnotherRunnerTest(unittest.TestCase):
+    MARK = "Banco inacessível"
+
+    def test_retry_job_runs_the_same_steps_without_deferring(self):
+        self.assertIn("steps: &search-steps", job_block("buscar-vagas"))
+        self.assertIn("DEFER_UNREACHABLE: 'true'", job_block("buscar-vagas"))
+        retry = job_block("repetir-vagas")
+        self.assertIn("steps: *search-steps", retry)
+        self.assertNotIn("DEFER_UNREACHABLE", retry)
+        self.assertIn("source: ${{ fromJSON(needs.planejar-repeticao.outputs.sources) }}", retry)
+        self.assertIn("needs.planejar-repeticao.outputs.sources != '[]'", retry)
+
+    def test_unreachable_mark_comes_right_after_the_search(self):
+        names = step_names("buscar-vagas")
+        self.assertEqual(names[names.index("Executar bot") + 1], self.MARK)
+        self.assertIn("if: steps.run.outputs.unreachable == 'true'", step_block("buscar-vagas", self.MARK))
+        # The interrupted note would try the unreachable database too and alert directly
+        self.assertIn("steps.run.outcome != 'success'", step_block("buscar-vagas", "Anotar busca interrompida"))
+
+    def test_plan_reads_the_mark_by_name_with_read_only_actions_access(self):
+        plan = job_block("planejar-repeticao")
+        for text in ("needs: buscar-vagas", "if: ${{ !cancelled() }}", "actions: read",
+                     f'.name == "{self.MARK}"', 'startswith("buscar-vagas (")',
+                     "sources: ${{ steps.plan.outputs.sources }}"):
+            self.assertIn(text, plan)
+        self.assertNotIn("write", plan)
+        self.assertNotIn("PB_", plan)
+
+    def test_workflow_parses_with_the_anchor_resolved(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        jobs = yaml.safe_load(TEXT)["jobs"]
+        self.assertEqual(jobs["repetir-vagas"]["steps"], jobs["buscar-vagas"]["steps"])
 
 
 class DependencyCacheTest(unittest.TestCase):
