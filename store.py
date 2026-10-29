@@ -14,8 +14,9 @@ ENV_BOT_PASSWORD = "PB_BOT_PASSWORD"
 # Slightly over a multiple of 3 s, the TCP retransmission window (requests docs, "Timeouts")
 CONNECT_TIMEOUT_S = 6.05
 READ_TIMEOUT_S = 15
-# Pause before each new attempt: a network blip between the runner and the VPS can last ~30 s
-RETRY_DELAYS_S = (2, 5, 10)
+# Pause before each new attempt: a network blip between the runner and the VPS has lasted
+# over 40 s, so the attempts span ~2 min before giving up
+RETRY_DELAYS_S = (2, 5, 10, 20, 40)
 PAGE_SIZE = 500
 
 MSG_UNAVAILABLE = "o banco de vagas não respondeu"
