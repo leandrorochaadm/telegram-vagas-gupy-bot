@@ -12,6 +12,7 @@ from urllib.parse import unquote
 
 import requests
 
+from http_proxy import scraper_proxies
 from linkedin_posts import BRAVE_URL, MAX_OFFSET, REQUEST_INTERVAL, RESULTS_PER_PAGE
 from store import Store
 
@@ -37,7 +38,7 @@ def extract_tenants(text: str) -> set[str]:
     return {slug.lower() for slug in _RE_TENANT.findall(unquote(text))} - NON_TENANTS
 
 
-def search_yahoo(query: str) -> tuple[set[str], bool]:
+def search_yahoo(query: str, *, proxy: str | None = None) -> tuple[set[str], bool]:
     """Tenants in the first Yahoo result pages (free, no API key), and whether Yahoo answered.
 
     Yahoo sometimes fails a single page and the next one works, so the query only
@@ -48,7 +49,8 @@ def search_yahoo(query: str) -> tuple[set[str], bool]:
     for page in range(YAHOO_PAGES):
         params = {"p": query, "b": 1 + page * YAHOO_PAGE_STEP}
         try:
-            resp = requests.get(YAHOO_URL, params=params, headers=HEADERS, timeout=15)
+            resp = requests.get(YAHOO_URL, params=params, headers=HEADERS, timeout=15,
+                                proxies=scraper_proxies(proxy))
         except requests.RequestException as e:
             print(f"   🛑 Yahoo: {e}")
             failed += 1
@@ -111,7 +113,7 @@ def discovery_due(db: Store, every: timedelta, now: datetime | None = None) -> b
 
 
 def discover(db: Store, *, queries: list[str], brave_api_key: str | None, every: timedelta,
-             errors: list[str] | None = None) -> list[str]:
+             errors: list[str] | None = None, proxy: str | None = None) -> list[str]:
     """Search for new tenants when the last run is older than `every`; return all known ones.
 
     Problems worth telling the user about are appended to `errors`.
@@ -125,7 +127,7 @@ def discover(db: Store, *, queries: list[str], brave_api_key: str | None, every:
     yahoo_failed = 0
     brave_errors: list[str] = []
     for query in queries:
-        tenants, answered = search_yahoo(query)
+        tenants, answered = search_yahoo(query, proxy=proxy)
         found |= tenants
         yahoo_failed += not answered
         if brave_api_key:

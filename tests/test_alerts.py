@@ -624,5 +624,80 @@ class MainStoreTest(StoreAlertTestCase):
         self.assertEqual([a.label for a in self.db.pending_alerts()], [Source.BOT.api_value])
 
 
+class ProxyModesTest(StoreAlertTestCase):
+    """--check-proxy, --send-now and the REQUIRE_SCRAPER_PROXY guard."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, main, "_queue_jobs", False)
+        patcher = mock.patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop(main.ENV_REQUIRE_SCRAPER_PROXY, None)
+
+    def run_main(self, argv, proxy="socks5h://127.0.0.1:40000", **patches):
+        sources = {name: mock.DEFAULT for name in main.SOURCE_FUNCTIONS.values()}
+        sources.update(patches)
+        with mock.patch.object(main, "from_env", return_value=self.db), \
+             mock.patch.object(main, "SCRAPER_PROXY", proxy), \
+             mock.patch.multiple(main, TOKEN="t", CHAT_ID="c", **sources) as mocks:
+            return main.main(argv), mocks
+
+    def alert_texts(self):
+        return [a.text for a in self.db.pending_alerts()]
+
+    def test_check_proxy_with_empty_proxy_alerts_and_exits_78(self):
+        code, mocks = self.run_main(["--check-proxy"], proxy="")
+        self.assertEqual(code, main.EXIT_PROXY_DOWN)
+        self.assertEqual(self.alert_texts(), [main.AVISO_WARP_FORA])
+        mocks["buscar_vagas_gupy"].assert_not_called()
+
+    def test_check_proxy_with_warp_down_alerts_and_exits_78(self):
+        with mock.patch.object(main, "warp_is_on", return_value=False):
+            code, _ = self.run_main(["--check-proxy"])
+        self.assertEqual(code, main.EXIT_PROXY_DOWN)
+        self.assertEqual(self.alert_texts(), [main.AVISO_WARP_FORA])
+
+    def test_check_proxy_with_warp_on_exits_0_without_alert(self):
+        with mock.patch.object(main, "warp_is_on", return_value=True):
+            code, mocks = self.run_main(["--check-proxy"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.alert_texts(), [])
+        mocks["buscar_vagas_gupy"].assert_not_called()
+
+    def test_send_now_sends_each_job_and_does_not_queue(self):
+        def find_job(db):
+            main.registrar_e_enviar(db, "https://a/1", "Dev Flutter", "Acme", "01/10", "msg", Source.GUPY)
+
+        self.run_main(["--source", "gupy", "--send-now"], buscar_vagas_gupy=find_job)
+        self.telegram.assert_called_once_with("msg")
+        self.assertEqual(self.db.queued_jobs(), [])
+        self.assertTrue(self.db.is_sent("https://a/1"))
+
+    def test_source_without_send_now_still_queues(self):
+        def find_job(db):
+            main.registrar_e_enviar(db, "https://a/1", "Dev Flutter", "Acme", "01/10", "msg", Source.GUPY)
+
+        self.run_main(["--source", "gupy"], buscar_vagas_gupy=find_job)
+        self.telegram.assert_not_called()
+        self.assertEqual([j.link for j in self.db.queued_jobs()], ["https://a/1"])
+
+    def test_send_now_needs_source(self):
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            main.parse_args(["--send-now"])
+
+    def test_required_proxy_empty_exits_78_without_running_the_source(self):
+        os.environ[main.ENV_REQUIRE_SCRAPER_PROXY] = "true"
+        with self.assertRaises(SystemExit) as exit_:
+            self.run_main(["--source", "gupy", "--send-now"], proxy="")
+        self.assertEqual(exit_.exception.code, main.EXIT_PROXY_DOWN)
+        self.assertEqual(self.alert_texts(), [])
+
+    def test_not_required_runs_without_proxy(self):
+        os.environ[main.ENV_REQUIRE_SCRAPER_PROXY] = "TRUE"
+        _, mocks = self.run_main(["--source", "gupy", "--send-now"], proxy="")
+        mocks["buscar_vagas_gupy"].assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

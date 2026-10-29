@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 import requests
 
+from http_proxy import scraper_proxies
 from store import Source, Store
 
 API_URL = "https://portal.gupy.io/api/job-search/jobs"
@@ -60,13 +61,14 @@ def build_message(filter_name: str, job: dict, published: datetime | None) -> st
 
 def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, user_agent: str,
                 send: Callable, check: Callable[[str, str], tuple[bool, str]],
-                errors: list[str] | None = None) -> None:
+                errors: list[str] | None = None, proxy: str | None = None) -> None:
     """Run every filter and send the unseen jobs published in the last max_age_days.
 
     filters: {"nome", "params"}; params go straight to the API (jobName, workplaceType, limit).
     check: main.filtros_basicos(title, company) -> (blocked, reason).
     send: (db, link, title, company, date, message, source: Source) -> None; registers the job, the module never writes to db.
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
+    proxy: SOCKS/HTTP proxy URL for the requests (WARP on the VPS).
     """
     errors = [] if errors is None else errors
     headers = {
@@ -85,7 +87,8 @@ def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, user_agent
             params["offset"] = (page - 1) * params.get("limit", 10)
 
             try:
-                resp = requests.get(API_URL, headers=headers, params=params, timeout=15)
+                resp = requests.get(API_URL, headers=headers, params=params, timeout=15,
+                                    proxies=scraper_proxies(proxy))
                 if resp.status_code != 200:
                     print(f"   🛑 HTTP {resp.status_code}")
                     errors.append(f"{name}: a Gupy recusou a busca ({resp.status_code}).")

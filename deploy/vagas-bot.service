@@ -1,0 +1,33 @@
+# One round of the job bot. Started by vagas-bot.timer (Brasília time).
+#
+# System unit (not a user unit): user "deploy" has Linger=no, so a user unit would not start without a login.
+# User=deploy because the app, the venv and the Chromium live in /opt/vagas-bot, owned by deploy.
+# The app code does NOT update itself: update by hand (see docs/vps.md).
+[Unit]
+Description=Job bot (one round)
+Wants=network-online.target
+After=network-online.target warp-svc.service pocketbase-job-search.service
+# Any failed round (error, timeout, out of memory) sends one Telegram alert per failure streak.
+OnFailure=vagas-bot-failed.service
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/vagas-bot/app
+EnvironmentFile=/etc/vagas-bot/bot.env
+Environment=PATH=/home/deploy/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Chromium installed once (see docs/vps.md), the same one in every round.
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/vagas-bot/ms-playwright
+ExecStart=/opt/vagas-bot/venv/bin/python -u run_all.py
+# Runs only after a successful round: sends the "back to normal" alert if the last round had failed.
+# The leading "-" keeps a Telegram error from failing the round.
+ExecStartPost=-/home/deploy/.local/bin/uv run --script run_alert.py ok
+# Sources have a 12 min limit each; this covers them plus the final alerts.
+TimeoutStartSec=45min
+# Whole unit (7 sources + Chromium). If it is exceeded the kernel kills the biggest process, usually Chromium.
+MemoryMax=2G
+# /var/lib/vagas-bot: run_alert.py's failure flag, shared with vagas-bot-failed.service.
+StateDirectory=vagas-bot
+NoNewPrivileges=yes
+PrivateTmp=yes

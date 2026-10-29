@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 import requests
 
+from http_proxy import scraper_proxies
 from store import Source, Store
 
 API_URL = "https://api.remotar.com.br/jobs"
@@ -103,7 +104,8 @@ def _skip_reason(job: dict, workplaces: list[str], ignore_foreign: bool,
 
 def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, ignore_foreign: bool,
                 user_agent: str, send: Callable, check: Callable[[str, str], tuple[bool, str]],
-                errors: list[str] | None = None, now: datetime | None = None) -> None:
+                errors: list[str] | None = None, now: datetime | None = None,
+                proxy: str | None = None) -> None:
     """Run every filter and send the unseen jobs published in the last max_age_days.
 
     filters: {"nome", "termo", "modalidades"}; modalidades lists "remote" / "hybrid" / "on-site"
@@ -112,6 +114,7 @@ def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, ignore_for
     check: main.filtros_basicos(title, company) -> (blocked, reason).
     send: (db, link, title, company, date, message, source: Source) -> None; registers the job, the module never writes to db.
     errors: failed searches are appended here, as sentences ready for the Telegram alert.
+    proxy: SOCKS/HTTP proxy URL for the requests (WARP on the VPS).
     """
     errors = [] if errors is None else errors
     headers = {"User-Agent": user_agent, "Accept": "application/json"}
@@ -124,7 +127,8 @@ def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, ignore_for
         for page in range(1, MAX_PAGES + 1):
             params = {"search": job_filter["termo"], "active": "true", "page": page}
             try:
-                resp = requests.get(API_URL, params=params, headers=headers, timeout=15)
+                resp = requests.get(API_URL, params=params, headers=headers, timeout=15,
+                                    proxies=scraper_proxies(proxy))
                 if resp.status_code != 200:
                     print(f"   🛑 HTTP {resp.status_code}")
                     errors.append(f"{name}: o Remotar recusou a busca ({resp.status_code}).")
