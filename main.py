@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import gupy
+from http_proxy import scraper_proxies, warp_is_on
 import inhire_discovery
 import linkedin_login
 import linkedin_posts
@@ -52,6 +53,8 @@ BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 LINKEDIN_LI_AT = os.getenv("LINKEDIN_LI_AT")
 # Set by the workflow to WARP's local SOCKS proxy: Cloudflare blocks the runners' datacenter IPs
 SCRAPER_PROXY = os.getenv("SCRAPER_PROXY")
+# "true" on the VPS: without the proxy no source runs, so no job site sees the VPS's own IP
+ENV_REQUIRE_SCRAPER_PROXY = "REQUIRE_SCRAPER_PROXY"
 
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
@@ -532,6 +535,7 @@ def _varrer_gupy(db, erros):
         check=filtros_basicos,
         send=registrar_e_enviar,
         errors=erros,
+        proxy=SCRAPER_PROXY,
     )
 
 # --- 5. PROGRAMATHOR ---
@@ -562,7 +566,7 @@ def buscar_vagas_linkedin(db):
 
 def _linkedin_get(url: str, params: dict, headers: dict, pausa_restante: int) -> tuple[requests.Response, int]:
     """GET on the LinkedIn guest API retrying 429 with growing pauses, within the remaining pause budget."""
-    resp = requests.get(url, params=params, headers=headers, timeout=15)
+    resp = requests.get(url, params=params, headers=headers, timeout=15, proxies=scraper_proxies(SCRAPER_PROXY))
     for pausa_padrao in PAUSAS_NOVA_TENTATIVA_LINKEDIN:
         if resp.status_code != 429:
             break
@@ -576,7 +580,7 @@ def _linkedin_get(url: str, params: dict, headers: dict, pausa_restante: int) ->
         print(f"   ⏳ LinkedIn pediu uma pausa, nova tentativa em {pausa}s")
         time.sleep(pausa)
         pausa_restante -= pausa
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp = requests.get(url, params=params, headers=headers, timeout=15, proxies=scraper_proxies(SCRAPER_PROXY))
     return resp, pausa_restante
 
 def _varrer_linkedin(db, erros):
@@ -729,7 +733,7 @@ def _posts_com_login(db, erros):
         try:
             # No USER_AGENT here: linkedin_login builds one that matches the browser it launches
             posts = linkedin_login.search_posts(LINKEDIN_LI_AT, filtro["termo"], ROLAGENS_POSTS_LINKEDIN,
-                                                period=PERIODO_POSTS_LINKEDIN_LOGIN)
+                                                period=PERIODO_POSTS_LINKEDIN_LOGIN, proxy=SCRAPER_PROXY)
         except linkedin_login.LoginExpired as e:
             print(f"   🔒 O LinkedIn pediu login de novo ({e}): cookie expirado")
             marcar_login_expirado(db, LINKEDIN_LI_AT, erros)
@@ -811,7 +815,7 @@ def _get_inhire(url, headers):
     """GET na API da Inhire com uma nova tentativa: ela às vezes falha e volta logo em seguida."""
     for tentativa in range(2):
         try:
-            resp = requests.get(url, headers=headers, timeout=15)
+            resp = requests.get(url, headers=headers, timeout=15, proxies=scraper_proxies(SCRAPER_PROXY))
         except requests.RequestException:
             if tentativa == 1:
                 raise
@@ -832,6 +836,7 @@ def _varrer_inhire(db, erros):
         brave_api_key=BRAVE_API_KEY if USAR_BRAVE_DESCOBERTA_INHIRE else None,
         every=timedelta(days=DIAS_DESCOBERTA_INHIRE),
         errors=erros,
+        proxy=SCRAPER_PROXY,
     )
     print(f"   📋 {len(empresas)} empresas para verificar")
     filtros = [(filtro, _padrao_termos([filtro['termo']])) for filtro in FILTROS_INHIRE]
@@ -968,7 +973,8 @@ def _solides_pagina(caminho, pagina, headers):
     """Retorna (vagas, total_paginas, textos) lidos da página pública da Solides."""
     url = f"https://vagas.solides.com.br/vagas/{caminho}"
     for tentativa in range(2):
-        resp = requests.get(url, headers=headers, params={'page': pagina}, timeout=20)
+        resp = requests.get(url, headers=headers, params={'page': pagina}, timeout=20,
+                            proxies=scraper_proxies(SCRAPER_PROXY))
         if resp.status_code != 200:
             raise FalhaFonte(f"o site recusou a busca ({resp.status_code})")
         flight = _solides_flight(resp.text)
@@ -1085,6 +1091,7 @@ def _varrer_remotar(db, erros):
         check=filtros_basicos,
         send=registrar_e_enviar,
         errors=erros,
+        proxy=SCRAPER_PROXY,
     )
 
 # --- MAIN ---
@@ -1138,6 +1145,9 @@ BS4_SOURCES = {Source.LINKEDIN.api_value}
 AVISO_FONTE_INTERROMPIDA = "A busca parou antes do fim (travou ou deu erro). Os outros sites não foram afetados."
 # EX_TEMPFAIL (sysexits.h): the workflow runs the source again on another runner
 EXIT_STORE_UNREACHABLE = 75
+# The proxy (WARP) is not usable: no source runs, so no job site sees the VPS's own IP
+EXIT_PROXY_DOWN = 78
+AVISO_WARP_FORA = "Não consegui ligar o WARP, nenhuma busca foi feita."
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Busca vagas e envia ao grupo do Telegram.")
@@ -1146,15 +1156,20 @@ def parse_args(argv):
     mode.add_argument("--failed", choices=SOURCES, help="anota que a fonte parou antes do fim")
     mode.add_argument("--send-jobs", action="store_true", help="envia as vagas guardadas pelos jobs")
     mode.add_argument("--send-alerts", action="store_true", help="envia os avisos guardados")
+    mode.add_argument("--check-proxy", action="store_true", help="confere o WARP antes da rodada")
+    parser.add_argument("--send-now", action="store_true", help="com --source: envia cada vaga assim que encontrada")
     parser.add_argument("--defer-unreachable", action="store_true",
                         help="banco fora do ar: sai com código 75, sem avisar, para outra máquina tentar")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.send_now and not args.source:
+        parser.error("--send-now só vale com --source")
+    return args
 
 def main(argv=()):
     global _queue_jobs
     args = parse_args(argv)
-    # Set on every call: a single-source run only queues, the others send
-    _queue_jobs = bool(args.source)
+    # Set on every call: a single-source run only queues (unless --send-now), the others send
+    _queue_jobs = bool(args.source) and not args.send_now
     if not TOKEN or not CHAT_ID:
         print("❌ ERRO: Token do Telegram ou Chat ID não encontrados no arquivo .env!")
         return
@@ -1171,6 +1186,24 @@ def main(argv=()):
         # Sem banco não dá para guardar o aviso: vai direto
         enviar_telegram(montar_aviso([(Source.BOT, f"Não foi possível abrir o banco de vagas, nenhuma busca foi feita: {e}")]))
         return
+
+    if args.check_proxy:
+        if SCRAPER_PROXY and warp_is_on(SCRAPER_PROXY):
+            print("✅ WARP ligado.")
+            return 0
+        print(f"❌ {AVISO_WARP_FORA}")
+        anotar_avisos(Source.BOT, [AVISO_WARP_FORA])
+        try:
+            store_alerts(db)
+        except Exception as e:
+            print(f"❌ Erro ao guardar os avisos: {e}")
+            enviar_telegram(montar_aviso(_avisos))
+        return EXIT_PROXY_DOWN
+
+    if args.source and os.getenv(ENV_REQUIRE_SCRAPER_PROXY) == "true" and not SCRAPER_PROXY:
+        # --check-proxy already alerted at the start of the round
+        print("❌ SCRAPER_PROXY vazio com REQUIRE_SCRAPER_PROXY=true: a fonte não roda.")
+        sys.exit(EXIT_PROXY_DOWN)
 
     # Parallel jobs only save their problems: the --send-alerts step sends one alert for all
     parallel_step = bool(args.source or args.failed or args.send_jobs)
@@ -1209,4 +1242,4 @@ def main(argv=()):
     print("\n✅ Varredura completa!" if sources else "\n✅ Pronto!")
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

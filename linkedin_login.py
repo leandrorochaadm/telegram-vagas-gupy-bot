@@ -16,6 +16,8 @@ from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlencode, urlparse
 
+from http_proxy import playwright_proxy
+
 SEARCH_URL = "https://www.linkedin.com/search/results/content/"
 # Where LinkedIn sends a session it no longer accepts
 LOGIN_PATHS = ("/login", "/uas/login", "/checkpoint", "/authwall", "/signup")
@@ -185,10 +187,10 @@ def _check_session(page, context) -> None:
 
 
 def search_posts(li_at: str, query: str, scrolls: int = 2, user_agent: str | None = None,
-                 period: str = "past-24h") -> list[dict]:
+                 period: str = "past-24h", proxy: str | None = None) -> list[dict]:
     """Search posts from `period` matching `query`, logged in with the `li_at` cookie.
 
-    `user_agent` defaults to browser_user_agent(). Raises LoginExpired when LinkedIn
+    `user_agent` defaults to browser_user_agent(). `proxy` is a SOCKS/HTTP proxy URL for the browser (WARP on the VPS). Raises LoginExpired when LinkedIn
     no longer accepts the cookie, SearchBlocked or ResultsNotFound when the page
     cannot be read, and ImportError when Playwright is not installed.
     """
@@ -197,7 +199,7 @@ def search_posts(li_at: str, query: str, scrolls: int = 2, user_agent: str | Non
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(proxy=playwright_proxy(proxy))
         try:
             context = browser.new_context(user_agent=user_agent or browser_user_agent(browser.version),
                                           locale="pt-BR")
