@@ -1,13 +1,11 @@
 name: Vagas Bot
 
 on:
-  # Main schedule lives in scheduler/ (Cloudflare Worker vagas-bot-scheduler):
-  # it calls workflow_dispatch on time, since GitHub's own
-  # schedule is delayed/dropped.
-  # This sparse cron is only a fallback in case the Worker stops (e.g. expired
-  # token); extra runs are harmless because sent jobs are deduplicated in the PocketBase database.
-  schedule:
-    - cron: '23 12,16,20 * * *'   # Reserva: 9h23, 13h23 e 17h23 (BRT), todo dia
+  # No schedule: the bot runs on the VPS (deploy/vagas-bot.timer, see docs/vps.md) and the
+  # Worker in scheduler/ has no crons. This workflow is a manual fallback if the VPS is down.
+  # To bring the GitHub schedule back, restore the Worker crons and this fallback:
+  #   schedule:
+  #     - cron: '23 12,16,20 * * *'   # 9h23, 13h23 e 17h23 (BRT), todo dia
   workflow_dispatch:              # Permite rodar manualmente pelo GitHub
 
 permissions:

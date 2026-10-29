@@ -429,7 +429,7 @@ Após o fork, vá em **Actions** no seu repositório e clique em **"I understand
 
 ### 3. Horários de execução
 
-Na VPS, o timer `vagas-bot.timer` usa os mesmos horários (em Brasília, direto na unit); o Worker e a reserva abaixo valem só enquanto o bot roda pelo GitHub.
+**Hoje o bot roda na VPS**, pelo timer `vagas-bot.timer` (horários em Brasília, direto na unit; veja [docs/vps.md](docs/vps.md)). O Worker está publicado **sem horários** e o workflow **sem `schedule`**: pelo GitHub, só roda à mão (**Actions → Vagas Bot → Run workflow**), como reserva se a VPS cair. O que segue descreve como era o agendamento pelo GitHub, para voltar a ele se preciso.
 
 O agendamento nativo do GitHub Actions atrasa ou pula execuções. Por isso, o horário principal fica num Cloudflare Worker (grátis), que dispara o workflow no minuto certo:
 - **Segunda a sexta:** a cada 2h, das 8h às 20h (BRT)
