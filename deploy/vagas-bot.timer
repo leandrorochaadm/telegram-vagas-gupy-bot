@@ -1,0 +1,16 @@
+# Schedule of the job bot. The times are already Brasília time (the zone is in OnCalendar): do not convert to UTC.
+[Unit]
+Description=Job bot schedule (Brasília time)
+
+[Timer]
+# Mon-Fri 8h, 10h ... 20h
+OnCalendar=Mon..Fri *-*-* 08..20/2:00:00 America/Sao_Paulo
+# Sat and Sun 10h, 14h, 18h
+OnCalendar=Sat,Sun *-*-* 10,14,18:00:00 America/Sao_Paulo
+AccuracySec=1s
+RandomizedDelaySec=60
+# Runs the round missed while the VPS was off
+Persistent=true
+
+[Install]
+WantedBy=timers.target

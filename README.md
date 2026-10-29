@@ -404,6 +404,8 @@ EMPRESAS_IGNORADAS = [
 
 ## 🤖 Configurando o GitHub Actions
 
+> **Produção na VPS:** o bot também pode rodar na VPS, por um timer do systemd e pelo WARP. Veja [docs/vps.md](docs/vps.md). Nesse modo o GitHub Actions fica só como reserva manual.
+
 O bot roda via GitHub Actions. O agendamento principal é feito por um Cloudflare Worker, e o workflow tem um agendamento de reserva com poucos horários.
 
 ### 1. Adicione os secrets no repositório
@@ -426,6 +428,8 @@ Vá em **Settings → Secrets and variables → Actions → New repository secre
 Após o fork, vá em **Actions** no seu repositório e clique em **"I understand my workflows, go ahead and enable them"** se aparecer o aviso de workflows desabilitados.
 
 ### 3. Horários de execução
+
+Na VPS, o timer `vagas-bot.timer` usa os mesmos horários (em Brasília, direto na unit); o Worker e a reserva abaixo valem só enquanto o bot roda pelo GitHub.
 
 O agendamento nativo do GitHub Actions atrasa ou pula execuções. Por isso, o horário principal fica num Cloudflare Worker (grátis), que dispara o workflow no minuto certo:
 - **Segunda a sexta:** a cada 2h, das 8h às 20h (BRT)

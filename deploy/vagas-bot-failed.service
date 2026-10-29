@@ -1,0 +1,17 @@
+# Sends the Telegram alert when a vagas-bot.service round fails (its OnFailure=).
+# Alerts once per failure streak; vagas-bot.service sends the "back to normal" alert.
+[Unit]
+Description=Telegram alert for a failed job bot round
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/vagas-bot/app
+EnvironmentFile=/etc/vagas-bot/bot.env
+Environment=PATH=/home/deploy/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/deploy/.local/bin/uv run --script run_alert.py failed
+TimeoutStartSec=60
+StateDirectory=vagas-bot
+NoNewPrivileges=yes
+PrivateTmp=yes
