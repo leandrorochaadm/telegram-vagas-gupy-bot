@@ -21,6 +21,7 @@ from store import (  # noqa: E402
     Collection, DescriptionStatus, JobDescription, SentJob, Source, Store, StoreError,
     StoreFailure, _parse_date,
 )
+from store import SavedDescription  # noqa: E402
 
 BOT_EMAIL = "bot@test.local"
 BRASILIA = timezone(timedelta(hours=-3))
@@ -400,6 +401,51 @@ class StoreContractCases:
                          (DescriptionStatus.PENDING, 0, ""))
         self.assertIsNone(row["finished_at"])
 
+    def test_saved_descriptions_only_saved_and_since(self) -> None:
+        for link in "ABCDE":
+            self.add_description(link)
+        ids = {link: self.description_id(link) for link in "ABCDE"}
+        T = datetime(2026, 1, 10, 12, tzinfo=timezone.utc)
+        self.db.save_description(ids["A"], "texto A", "senior", "clt", T)
+        self.db.save_description(ids["B"], "", "", "", T - timedelta(seconds=1))
+        self.db.finish_description(ids["D"], DescriptionStatus.CLOSED, T)
+        self.db.finish_description(ids["E"], DescriptionStatus.GAVE_UP, T)
+        result = self.db.saved_descriptions()
+        self.assertEqual([d.link for d in result], ["B", "A"])
+        self.assertEqual(result[0].description, "")
+        self.assertEqual([d.link for d in self.db.saved_descriptions(since=T)], ["A"])
+        self.assertEqual(
+            self.db.saved_descriptions(since=T + timedelta(seconds=1)), [])
+        self.assertEqual(
+            [d.link for d in self.db.saved_descriptions(since=T.astimezone(BRASILIA))], ["A"])
+        a = self.db.saved_descriptions(since=T)[0]
+        self.assertIsInstance(a, SavedDescription)
+        self.assertIs(a.source, Source.GUPY)
+        self.assertEqual((a.title, a.company, a.published, a.description, a.seniority,
+                          a.employment_type), ("t", "company", "2026-01-01", "texto A",
+                                               "senior", "clt"))
+        self.assertEqual(a.finished_at, T)
+        self.assertEqual(a.finished_at.tzinfo, timezone.utc)
+
+    def test_saved_descriptions_empty(self) -> None:
+        self.assertEqual(self.db.saved_descriptions(), [])
+        self.add_description("A")
+        self.assertEqual(self.db.saved_descriptions(), [])
+
+    def test_saved_descriptions_tie_orders_by_id(self) -> None:
+        for link in "AB":
+            self.add_description(link)
+        T = datetime(2026, 1, 10, 12, tzinfo=timezone.utc)
+        for link in "AB":
+            self.db.save_description(self.description_id(link), "x", "", "", T)
+        result = self.db.saved_descriptions()
+        self.assertEqual(len(result), 2)
+        self.assertEqual([d.id for d in result], sorted(d.id for d in result))
+
+    def test_saved_descriptions_naive_since_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            self.db.saved_descriptions(since=datetime(2026, 1, 1, 10))
+
 
 class FakeStoreContractTest(StoreContractCases, unittest.TestCase):
     def make_store(self) -> FakeStore:
@@ -506,6 +552,15 @@ class FakeStoreOnlyTest(unittest.TestCase):
                     call()
                 self.assertIs(caught.exception, error)
         self.assertEqual(fake.count(Collection.JOB_DESCRIPTIONS), 0)
+
+    def test_fail_with_covers_saved_descriptions(self) -> None:
+        error = StoreError("o banco de vagas não respondeu")
+        fake = FakeStore(fail_with=error)
+        when = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for call in (fake.saved_descriptions, lambda: fake.saved_descriptions(since=when)):
+            with self.assertRaises(StoreError) as caught:
+                call()
+            self.assertIs(caught.exception, error)
 
     def test_count_bot_accounts_raises_value_error(self) -> None:
         with self.assertRaises(ValueError):

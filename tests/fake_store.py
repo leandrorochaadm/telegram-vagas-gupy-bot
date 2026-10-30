@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from store import (  # noqa: E402
     FINISHED_STATUSES, Alert, Collection, DescriptionStatus, JobDescription, LinkedinSession,
-    QueuedJob, SentJob, Source, StoreError, StoreFailure, MSG_REJECTED,
+    QueuedJob, SavedDescription, SentJob, Source, StoreError, StoreFailure, MSG_REJECTED,
     _Field, _format_date, _parse_date,
 )
 
@@ -252,6 +252,19 @@ class FakeStore:
             id=row.id, link=row.link, source=row.source, title=row.title, company=row.company,
             published=row.published, attempts=row.attempts, first_try_at=row.first_try_at,
             created=row.created) for row in tried + fresh]
+
+    def saved_descriptions(self, since: datetime | None = None) -> list[SavedDescription]:
+        self._check()
+        cutoff = _utc(since) if since is not None else None
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        rows = [row for row in self.descriptions.values()
+                if row.status is DescriptionStatus.SAVED
+                and (cutoff is None or (row.finished_at is not None and row.finished_at >= cutoff))]
+        rows.sort(key=lambda row: (row.finished_at or oldest, row.id))
+        return [SavedDescription(
+            id=row.id, link=row.link, source=row.source, title=row.title, company=row.company,
+            published=row.published, description=row.description, seniority=row.seniority,
+            employment_type=row.employment_type, finished_at=row.finished_at) for row in rows]
 
     def save_description(self, record_id: str, text: str, seniority: str,
                          employment_type: str, at: datetime) -> None:

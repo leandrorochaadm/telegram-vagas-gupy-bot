@@ -523,5 +523,45 @@ class DescriptionsTest(StoreTestCase):
         self.assertIn("first_try_at", self.call().kwargs["json"])
 
 
+class SavedDescriptionsTest(StoreTestCase):
+    def test_saved_filter_without_since(self):
+        self.reply(response(200, page([])))
+        self.db.saved_descriptions()
+        self.assertEqual(self.call().kwargs["params"]["filter"], 'status = "saved"')
+
+    def test_saved_filter_with_since_in_utc(self):
+        self.reply(response(200, page([])))
+        self.db.saved_descriptions(since=datetime(2026, 1, 1, 7, tzinfo=BRASILIA))
+        self.assertEqual(self.call().kwargs["params"]["filter"],
+                         'status = "saved" && finished_at >= "2026-01-01 10:00:00.000Z"')
+
+    def test_saved_naive_since_makes_no_request(self):
+        with self.assertRaises(ValueError):
+            self.db.saved_descriptions(since=datetime(2026, 1, 1, 10))
+        self.session.request.assert_not_called()
+
+    def test_saved_skips_other_status_and_sorts(self):
+        self.reply(response(200, page([
+            {"id": "b", "status": "saved", "finished_at": "2026-01-02 10:00:00.000Z",
+             "link": "B", "description": "x"},
+            {"id": "a", "status": "saved", "finished_at": "2026-01-02 10:00:00.000Z"},
+            {"id": "c", "status": "weird", "finished_at": "2026-01-01 09:00:00.000Z"},
+            {"id": "d", "status": "saved", "finished_at": "2026-01-01 10:00:00.000Z",
+             "source": "nope"},
+        ])))
+        result = self.db.saved_descriptions()
+        self.assertEqual([d.id for d in result], ["d", "a", "b"])
+        self.assertIs(result[0].source, store.Source.UNKNOWN)
+        self.assertEqual((result[1].link, result[1].description, result[1].title), ("", "", ""))
+
+
+class AnalysisSourceTest(unittest.TestCase):
+    def test_analysis_source(self):
+        self.assertIs(store.Source.from_api("analysis"), store.Source.ANALYSIS)
+        self.assertEqual(store.Source.ANALYSIS.label, "ANÁLISE DAS VAGAS")
+        self.assertEqual(store.Source.ANALYSIS.api_value, "analysis")
+        self.assertNotIn(store.Source.ANALYSIS, store.Source.search_sources())
+
+
 if __name__ == "__main__":
     unittest.main()

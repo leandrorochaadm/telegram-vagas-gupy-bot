@@ -96,6 +96,7 @@ class Source(StrEnum):
     PROGRAMATHOR = ("programathor", "PROGRAMATHOR", False)
     BOT = ("bot", "BOT", False)
     TELEGRAM = ("telegram", "TELEGRAM", False)
+    ANALYSIS = ("analysis", "ANÁLISE DAS VAGAS", False)
     UNKNOWN = ("unknown", "FONTE DESCONHECIDA", False)
 
     label: str
@@ -194,6 +195,20 @@ class JobDescription:
     attempts: int
     first_try_at: datetime | None
     created: datetime | None
+
+
+@dataclass(frozen=True)
+class SavedDescription:
+    id: str
+    link: str
+    source: Source
+    title: str
+    company: str
+    published: str
+    description: str
+    seniority: str
+    employment_type: str
+    finished_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -451,6 +466,28 @@ class Store:
         tried.sort(key=lambda item: item[0])
         fresh.sort(key=lambda item: item[0], reverse=True)
         return [job for _, job in tried] + [job for _, job in fresh]
+
+    def saved_descriptions(self, since: datetime | None = None) -> list[SavedDescription]:
+        filter_ = f"{_Field.STATUS} = {_quote(DescriptionStatus.SAVED.api_value)}"
+        if since is not None:
+            filter_ += f" && {_Field.FINISHED_AT} >= {_quote(_format_date(since))}"
+        rows = self._list_all(Collection.JOB_DESCRIPTIONS, filter=filter_)
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        saved: list[SavedDescription] = []
+        for row in rows:
+            if DescriptionStatus.from_api(row.get(_Field.STATUS)) is not DescriptionStatus.SAVED:
+                continue
+            saved.append(SavedDescription(
+                id=row[_Field.ID], link=row.get(_Field.LINK) or "",
+                source=Source.from_api(row.get(_Field.SOURCE)),
+                title=row.get(_Field.TITLE) or "", company=row.get(_Field.COMPANY) or "",
+                published=row.get(_Field.PUBLISHED) or "",
+                description=row.get(_Field.DESCRIPTION) or "",
+                seniority=row.get(_Field.SENIORITY) or "",
+                employment_type=row.get(_Field.EMPLOYMENT_TYPE) or "",
+                finished_at=_parse_date(row.get(_Field.FINISHED_AT))))
+        saved.sort(key=lambda item: (item.finished_at or oldest, item.id))
+        return saved
 
     def save_description(self, record_id: str, text: str, seniority: str,
                          employment_type: str, at: datetime) -> None:
