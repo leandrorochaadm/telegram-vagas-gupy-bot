@@ -1,4 +1,5 @@
-"""One round of the bot on the VPS: checks WARP, runs every source at once (each sends its jobs as found), then alerts.
+"""One round of the bot on the VPS: checks WARP, runs every source at once (each sends its jobs as found), sends the
+queue, fetches the pending job descriptions (only with WARP up), then sends the alerts.
 
 Replaces the matrix + `finalizar` jobs of the GitHub workflow. Started by vagas-bot.service.
 """
@@ -17,6 +18,7 @@ from store import Source
 
 SOURCE_TIMEOUT_S = 12 * 60
 SEND_TIMEOUT_S = 15 * 60
+DESCRIPTIONS_TIMEOUT_S = 10 * 60
 KILL_GRACE_S = 10
 POLL_INTERVAL_S = 1
 EXIT_PROXY_DOWN = 78  # main.EXIT_PROXY_DOWN; not imported to keep main.py (and its env loading) out of this process
@@ -177,7 +179,9 @@ def run_sources(spawn: Spawn, cgroup: Path | None, *, clock: Callable[[], float]
     return outcomes
 
 
-def main(argv: Sequence[str] = (), *, spawn: Spawn = spawn_source, run: Run = run_step) -> int:
+def main(argv: Sequence[str] = (), *, spawn: Spawn = spawn_source, run: Run = run_step,
+         fetch_descriptions: bool = False) -> int:
+    # fetch_descriptions is off by default only so the older tests keep their exact step lists; __main__ turns it on.
     cgroup = cgroup_dir()
     proxy_code = run(_python_main("--check-proxy"))
     if proxy_code != 0:
@@ -188,6 +192,8 @@ def main(argv: Sequence[str] = (), *, spawn: Spawn = spawn_source, run: Run = ru
             if outcome is not SourceOutcome.OK:
                 run(_python_main("--failed", source.api_value))
     run(_python_main("--send-jobs"))
+    if fetch_descriptions and proxy_code == 0:
+        run(_python_main("--fetch-descriptions"), timeout=DESCRIPTIONS_TIMEOUT_S)  # exit code ignored on purpose
     alerts_code = run(_python_main("--send-alerts"))
     peak = read_peak_bytes(cgroup)
     if peak is not None:
@@ -197,4 +203,4 @@ def main(argv: Sequence[str] = (), *, spawn: Spawn = spawn_source, run: Run = ru
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], fetch_descriptions=True))

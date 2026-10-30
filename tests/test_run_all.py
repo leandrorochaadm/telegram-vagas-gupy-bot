@@ -169,5 +169,101 @@ class RunAllTest(unittest.TestCase):
         self.assertEqual(run_all.outcome_line("gupy", SourceOutcome.OK, 72, 0), "[gupy] ✅ terminou em 1m12s")
 
 
+class _RoundHarness(unittest.TestCase):
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cg = Path(tmp.name)
+        self.spawned = []
+        self.steps = []
+        self.kwargs = []
+        self.codes = {}
+        self.now = 0.0
+        self.killpg = mock.patch.object(run_all.os, "killpg").start()
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(run_all, "cgroup_dir", return_value=self.cg).start()
+
+    def spawn_factory(self, procs):
+        def spawn(cmd, **kwargs):
+            self.spawned.append(cmd)
+            return procs[cmd[cmd.index("--source") + 1]]
+        return spawn
+
+    def run_step(self, cmd, **kwargs):
+        self.steps.append(cmd[3:] if len(cmd) > 3 else cmd)
+        flag = next((a for a in cmd if a.startswith("--") and a != "-u"), "")
+        self.kwargs.append((flag, kwargs))
+        return self.codes.get(flag, 0)
+
+    def clock(self):
+        self.now += 1
+        return self.now
+
+    def go(self, procs=None, clock=None):
+        procs = procs or {name: FakeProc(0) for name in SOURCES}
+        real_run_sources = run_all.run_sources
+
+        def run_sources(spawn, cgroup):
+            return real_run_sources(spawn, cgroup, clock=clock or self.clock, pause=lambda _: None)
+
+        out = io.StringIO()
+        with redirect_stdout(out), mock.patch.object(run_all, "run_sources", run_sources):
+            code = run_all.main(spawn=self.spawn_factory(procs), run=self.run_step, fetch_descriptions=True)
+        return code, out.getvalue()
+
+    def flags(self):
+        return [next(a for a in s if a.startswith("--")) for s in self.steps]
+
+
+class DescriptionsStepTest(_RoundHarness):
+
+    def test_descriptions_step_runs_between_send_jobs_and_alerts(self):
+        code, _ = self.go()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.flags(), ["--check-proxy", "--send-jobs", "--fetch-descriptions", "--send-alerts"])
+
+    def test_descriptions_step_runs_after_failed_retries(self):
+        procs = {name: FakeProc(0) for name in SOURCES}
+        procs["gupy"] = FakeProc(1)
+        self.go(procs)
+        self.assertEqual(self.flags(), ["--check-proxy", "--failed", "--send-jobs", "--fetch-descriptions",
+                                        "--send-alerts"])
+
+    def test_descriptions_step_skipped_when_warp_down(self):
+        self.codes["--check-proxy"] = 78
+        self.go()
+        self.assertEqual(self.flags(), ["--check-proxy", "--send-jobs", "--send-alerts"])
+
+    def test_descriptions_step_skipped_on_other_proxy_error(self):
+        self.codes["--check-proxy"] = 1
+        self.go()
+        self.assertNotIn("--fetch-descriptions", self.flags())
+
+    def test_descriptions_step_failure_does_not_change_exit_code(self):
+        self.codes["--fetch-descriptions"] = 1
+        code, _ = self.go()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.flags()[-1], "--send-alerts")
+
+    def test_descriptions_step_proxy_exit_does_not_change_exit_code(self):
+        self.codes["--fetch-descriptions"] = 78
+        code, _ = self.go()
+        self.assertEqual(code, 0)
+
+    def test_descriptions_step_uses_its_own_timeout(self):
+        self.go()
+        timeouts = {flag: kwargs.get("timeout") for flag, kwargs in self.kwargs}
+        self.assertEqual(timeouts["--fetch-descriptions"], run_all.DESCRIPTIONS_TIMEOUT_S)
+        self.assertEqual(run_all.DESCRIPTIONS_TIMEOUT_S, 600)
+        for flag in ("--check-proxy", "--send-jobs", "--send-alerts"):
+            self.assertIsNone(timeouts[flag])
+
+    def test_exit_code_still_follows_send_alerts(self):
+        self.codes["--send-alerts"] = 1
+        code, _ = self.go()
+        self.assertEqual(code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
