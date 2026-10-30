@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import gupy
 from http_proxy import scraper_proxies, warp_is_on
 import inhire_discovery
+import job_details  # module import, so tests can patch main.job_details.fetch_details
 import linkedin_login
 import linkedin_posts
 import programathor
@@ -362,6 +363,8 @@ _queue_jobs = False
 
 ALERT_SENT_NOT_SAVED = "uma vaga foi enviada mas não ficou registrada: {title}. Ela pode chegar repetida uma vez."
 ALERT_DUPLICATE_NOT_SAVED = "uma vaga repetida não ficou registrada: {title}. Ela pode chegar repetida uma vez."
+ALERT_DESCRIPTION_NOT_QUEUED = "a descrição de uma vaga não vai ser guardada: {title}."
+ALERT_BACKFILL_NOT_DONE = "Não foi possível recuperar as descrições das vagas antigas: {error}. Rode de novo."
 ALERT_QUEUE_NOT_SENT = "Não foi possível enviar as vagas da fila: {error}. Elas vão na próxima execução."
 
 def queue_job(db: Store, link, titulo, empresa, data_f, mensagem, fonte: Source):
@@ -380,6 +383,33 @@ def send_queued_jobs(db: Store):
             registrar_e_enviar(db, job.link, job.title, job.company, job.published, job.message, job.source)
         if db.is_sent(job.link):
             db.delete_queued(job.id)
+
+def guardar_descricao_pendente(db: Store, link, titulo, empresa, data_f, fonte: Source) -> None:
+    """Create the description record of a sent job (a LinkedIn post is born saved with its own text)."""
+    if fonte == Source.LINKEDIN_POSTS or job_details.source_from_link(link) == Source.LINKEDIN_POSTS:
+        db.add_job_description(link, titulo, empresa, fonte, data_f, description=titulo)
+    else:
+        db.add_job_description(link, titulo, empresa, fonte, data_f)
+
+def recuperar_descricoes_antigas(db: Store) -> int:
+    """Create the description record of every sent job that has none, skipping copies of the same job."""
+    ja_registrados = db.description_links()
+    enviadas = db.sent_jobs()
+
+    def chave(job):
+        return (_chave_sessao(job.title, ""), job.published)
+
+    vistas = {chave(job) for job in enviadas if job.link in ja_registrados}
+    total = 0
+    for job in enviadas:
+        if job.link in ja_registrados or chave(job) in vistas:
+            continue
+        fonte = job_details.source_from_link(job.link)
+        guardar_descricao_pendente(db, job.link, job.title, "", job.published, fonte)
+        vistas.add(chave(job))
+        total += 1
+    print(f"📝 {total} vagas antigas entraram na fila de descrição.")
+    return total
 
 def registrar_e_enviar(db: Store, link, titulo, empresa, data_f, mensagem, fonte: Source):
     if _queue_jobs:
@@ -404,6 +434,11 @@ def registrar_e_enviar(db: Store, link, titulo, empresa, data_f, mensagem, fonte
             print(f"   ✅ {titulo[:50]}...")
         except StoreError:
             anotar_avisos(Source.BOT, [ALERT_SENT_NOT_SAVED.format(title=titulo[:60])])
+        else:
+            try:
+                guardar_descricao_pendente(db, link, titulo, empresa, data_f, fonte)
+            except StoreError:
+                anotar_avisos(Source.BOT, [ALERT_DESCRIPTION_NOT_QUEUED.format(title=titulo[:60])])
     else:
         _falhas_envio.append(f"{titulo[:60]} ({fonte.label})")
     time.sleep(PAUSA_ENTRE_VAGAS)
@@ -1156,6 +1191,8 @@ def parse_args(argv):
     mode.add_argument("--failed", choices=SOURCES, help="anota que a fonte parou antes do fim")
     mode.add_argument("--send-jobs", action="store_true", help="envia as vagas guardadas pelos jobs")
     mode.add_argument("--send-alerts", action="store_true", help="envia os avisos guardados")
+    mode.add_argument("--backfill-descriptions", action="store_true",
+                      help="cria a fila de descrição das vagas já enviadas")
     mode.add_argument("--check-proxy", action="store_true", help="confere o WARP antes da rodada")
     parser.add_argument("--send-now", action="store_true", help="com --source: envia cada vaga assim que encontrada")
     parser.add_argument("--defer-unreachable", action="store_true",
@@ -1206,7 +1243,7 @@ def main(argv=()):
         sys.exit(EXIT_PROXY_DOWN)
 
     # Parallel jobs only save their problems: the --send-alerts step sends one alert for all
-    parallel_step = bool(args.source or args.failed or args.send_jobs)
+    parallel_step = bool(args.source or args.failed or args.send_jobs or args.backfill_descriptions)
     # Full run (local) by default; the workflow runs each step in its own job
     if args.source:
         sources = [args.source]
@@ -1225,6 +1262,12 @@ def main(argv=()):
         except StoreError as e:
             anotar_avisos(Source.BOT, [ALERT_QUEUE_NOT_SENT.format(error=e)])
     anotar_falhas_envio()
+
+    if args.backfill_descriptions:
+        try:
+            recuperar_descricoes_antigas(db)
+        except StoreError as e:
+            anotar_avisos(Source.BOT, [ALERT_BACKFILL_NOT_DONE.format(error=e)])
 
     if args.failed:
         anotar_avisos(SOURCES[args.failed][1], [AVISO_FONTE_INTERROMPIDA])
