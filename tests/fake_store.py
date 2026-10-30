@@ -5,12 +5,14 @@ tests/test_store_contract.py), without any network. Not a test module itself.
 """
 import os
 import sys
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from store import (  # noqa: E402
-    Alert, Collection, LinkedinSession, QueuedJob, Source, StoreError,
+    FINISHED_STATUSES, Alert, Collection, DescriptionStatus, JobDescription, LinkedinSession,
+    QueuedJob, SentJob, Source, StoreError, StoreFailure, MSG_REJECTED,
     _Field, _format_date, _parse_date,
 )
 
@@ -20,6 +22,26 @@ _SESSION_FIELDS = (_Field.SEARCHED_AT, _Field.EXPIRED_AT, _Field.REMINDED_AT)
 def _utc(at: datetime) -> datetime:
     """Same precision and refusal of naive datetimes as the real Store."""
     return _parse_date(_format_date(at))
+
+
+@dataclass
+class StoredDescription:
+    id: str
+    link: str
+    source: Source
+    title: str
+    company: str
+    published: str
+    description: str
+    seniority: str
+    employment_type: str
+    status: DescriptionStatus
+    attempts: int
+    first_try_at: datetime | None
+    last_try_at: datetime | None
+    finished_at: datetime | None
+    created: datetime
+    seq: int
 
 
 class FakeStore:
@@ -36,6 +58,7 @@ class FakeStore:
         self._sessions: dict[str, dict[str, datetime | None]] = {}
         self._tenants: dict[str, datetime] = {}
         self._discovery: tuple[datetime, int] | None = None
+        self.descriptions: dict[str, StoredDescription] = {}
 
     # -- helpers -------------------------------------------------------
 
@@ -61,6 +84,7 @@ class FakeStore:
             Collection.LINKEDIN_SESSIONS: lambda: len(self._sessions),
             Collection.INHIRE_TENANTS: lambda: len(self._tenants),
             Collection.INHIRE_DISCOVERIES: lambda: int(self._discovery is not None),
+            Collection.JOB_DESCRIPTIONS: lambda: len(self.descriptions),
         }
         if collection not in counts:
             raise ValueError(f"not a data collection: {collection}")
@@ -81,6 +105,11 @@ class FakeStore:
     def mark_sent(self, link: str, published: str, title: str) -> None:
         self._check()
         self.sent.setdefault(link, (published, title))
+
+    def sent_jobs(self) -> list[SentJob]:
+        self._check()
+        return [SentJob(link=link, published=published, title=title)
+                for link, (published, title) in self.sent.items()]
 
     # -- queued_jobs ---------------------------------------------------
 
@@ -187,3 +216,72 @@ class FakeStore:
     def set_inhire_discovery(self, last_run: datetime, found: int) -> None:
         self._check()
         self._discovery = (_utc(last_run), found)
+
+    # -- job_descriptions ----------------------------------------------
+
+    def _description(self, record_id: str) -> StoredDescription:
+        for row in self.descriptions.values():
+            if row.id == record_id:
+                return row
+        raise StoreError(MSG_REJECTED, StoreFailure.REJECTED)
+
+    def add_job_description(self, link: str, title: str, company: str, source: Source,
+                            published: str, description: str | None = None) -> None:
+        self._check()
+        if link in self.descriptions:
+            return
+        created = _utc(datetime.now(timezone.utc))
+        saved = description is not None
+        self.descriptions[link] = StoredDescription(
+            id=self._new_id(), link=link, source=source, title=title, company=company,
+            published=published, description=description or "", seniority="",
+            employment_type="",
+            status=DescriptionStatus.SAVED if saved else DescriptionStatus.PENDING,
+            attempts=0, first_try_at=None, last_try_at=None,
+            finished_at=created if saved else None, created=created, seq=self._new_seq())
+
+    def pending_descriptions(self) -> list[JobDescription]:
+        self._check()
+        pending = [row for row in self.descriptions.values()
+                   if row.status is DescriptionStatus.PENDING]
+        tried = sorted((row for row in pending if row.attempts > 0),
+                       key=lambda row: (row.last_try_at, row.seq))
+        fresh = sorted((row for row in pending if row.attempts == 0),
+                       key=lambda row: (row.created, row.seq), reverse=True)
+        return [JobDescription(
+            id=row.id, link=row.link, source=row.source, title=row.title, company=row.company,
+            published=row.published, attempts=row.attempts, first_try_at=row.first_try_at,
+            created=row.created) for row in tried + fresh]
+
+    def save_description(self, record_id: str, text: str, seniority: str,
+                         employment_type: str, at: datetime) -> None:
+        self._check()
+        finished = _utc(at)
+        row = self._description(record_id)
+        row.description = text
+        row.seniority = seniority
+        row.employment_type = employment_type
+        row.status = DescriptionStatus.SAVED
+        row.finished_at = finished
+
+    def mark_description_try(self, record_id: str, attempts: int, at: datetime) -> None:
+        self._check()
+        tried = _utc(at)
+        row = self._description(record_id)
+        row.attempts = attempts
+        row.last_try_at = tried
+        if row.first_try_at is None:
+            row.first_try_at = tried
+
+    def finish_description(self, record_id: str, status: DescriptionStatus, at: datetime) -> None:
+        self._check()
+        if status not in FINISHED_STATUSES:
+            raise ValueError(f"not a finishing status: {status}")
+        finished = _utc(at)
+        row = self._description(record_id)
+        row.status = status
+        row.finished_at = finished
+
+    def description_links(self) -> set[str]:
+        self._check()
+        return set(self.descriptions)

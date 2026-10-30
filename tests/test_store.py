@@ -489,5 +489,39 @@ class FromEnvTest(unittest.TestCase):
         self.assertNotIn("secret", repr(db))
 
 
+class DescriptionsTest(StoreTestCase):
+    def test_unknown_description_status(self):
+        for raw in ("weird", None, "", "Pending"):
+            self.assertIs(store.DescriptionStatus.from_api(raw), store.DescriptionStatus.UNKNOWN)
+        for member in store.DescriptionStatus:
+            self.assertIs(store.DescriptionStatus.from_api(member.api_value), member)
+        self.reply(response(200, page([
+            {"id": "a", "link": "A", "status": "weird", "attempts": 0},
+            {"id": "b", "link": "B", "status": "pending", "attempts": 0}])))
+        self.assertEqual([job.id for job in self.db.pending_descriptions()], ["b"])
+
+    def test_pending_filter_uses_pending_status(self):
+        self.reply(response(200, page([])))
+        self.db.pending_descriptions()
+        self.assertEqual(self.call().kwargs["params"]["filter"], 'status = "pending"')
+
+    def test_add_job_description_not_unique_is_ignored(self):
+        self.reply(response(400, not_unique("link")))
+        self.db.add_job_description("A", "t", "c", store.Source.GUPY, "2026-01-01")
+
+    def test_mark_description_try_sends_first_try_only_when_empty(self):
+        at = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
+        self.reply(response(200, {"id": "a", "first_try_at": "2026-01-01 09:00:00.000Z"}),
+                   response(200, {}))
+        self.db.mark_description_try("a", 2, at)
+        body = self.call().kwargs["json"]
+        self.assertEqual(self.call().args[0], "PATCH")
+        self.assertNotIn("first_try_at", body)
+        self.assertEqual(body["attempts"], 2)
+        self.reply(response(200, {"id": "a", "first_try_at": ""}), response(200, {}))
+        self.db.mark_description_try("a", 1, at)
+        self.assertIn("first_try_at", self.call().kwargs["json"])
+
+
 if __name__ == "__main__":
     unittest.main()

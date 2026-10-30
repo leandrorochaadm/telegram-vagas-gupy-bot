@@ -47,6 +47,7 @@ class Collection(StrEnum):
     LINKEDIN_SESSIONS = "linkedin_sessions"
     INHIRE_TENANTS = "inhire_tenants"
     INHIRE_DISCOVERIES = "inhire_discoveries"
+    JOB_DESCRIPTIONS = "job_descriptions"
 
 
 class _Field(StrEnum):
@@ -69,6 +70,14 @@ class _Field(StrEnum):
     FOUND_AT = "found_at"
     LAST_RUN = "last_run"
     FOUND = "found"
+    DESCRIPTION = "description"
+    SENIORITY = "seniority"
+    EMPLOYMENT_TYPE = "employment_type"
+    STATUS = "status"
+    ATTEMPTS = "attempts"
+    FIRST_TRY_AT = "first_try_at"
+    LAST_TRY_AT = "last_try_at"
+    FINISHED_AT = "finished_at"
 
 
 _SESSION_FIELDS = (_Field.SEARCHED_AT, _Field.EXPIRED_AT, _Field.REMINDED_AT)
@@ -114,6 +123,27 @@ class Source(StrEnum):
         return [source for source in cls if source.is_search_source]
 
 
+class DescriptionStatus(StrEnum):
+    PENDING = "pending"
+    SAVED = "saved"
+    CLOSED = "closed"
+    GAVE_UP = "gave_up"
+    UNKNOWN = "unknown"
+
+    @property
+    def api_value(self) -> str:
+        return self.value
+
+    @classmethod
+    def from_api(cls, raw: str | None) -> "DescriptionStatus":
+        """Exact match only; anything else is UNKNOWN."""
+        member = cls._value2member_map_.get(raw) if isinstance(raw, str) else None
+        return member if member is not None else cls.UNKNOWN
+
+
+FINISHED_STATUSES = (DescriptionStatus.CLOSED, DescriptionStatus.GAVE_UP)
+
+
 class StoreFailure(StrEnum):
     UNAVAILABLE = "unavailable"
     LOGIN_REFUSED = "login_refused"
@@ -151,6 +181,26 @@ class LinkedinSession:
     searched_at: datetime | None
     expired_at: datetime | None
     reminded_at: datetime | None
+
+
+@dataclass(frozen=True)
+class JobDescription:
+    id: str
+    link: str
+    source: Source
+    title: str
+    company: str
+    published: str
+    attempts: int
+    first_try_at: datetime | None
+    created: datetime | None
+
+
+@dataclass(frozen=True)
+class SentJob:
+    link: str
+    published: str
+    title: str
 
 
 class _NotUnique(Exception):
@@ -228,6 +278,12 @@ class Store:
             pass
         if self._sent_links is not None:
             self._sent_links.add(link)
+
+    def sent_jobs(self) -> list[SentJob]:
+        fields = f"{_Field.LINK},{_Field.PUBLISHED},{_Field.TITLE}"
+        rows = self._list_all(Collection.SENT_JOBS, fields=fields)
+        return [SentJob(link=row.get(_Field.LINK, ""), published=row.get(_Field.PUBLISHED, ""),
+                        title=row.get(_Field.TITLE, "")) for row in rows]
 
     # -- queued_jobs ---------------------------------------------------
 
@@ -350,6 +406,79 @@ class Store:
     def set_inhire_discovery(self, last_run: datetime, found: int) -> None:
         self._set_single(Collection.INHIRE_DISCOVERIES, _Field.LAST_RUN, {
             _Field.LAST_RUN: _format_date(last_run), _Field.FOUND: found})
+
+    # -- job_descriptions ----------------------------------------------
+
+    def add_job_description(self, link: str, title: str, company: str, source: Source,
+                            published: str, description: str | None = None) -> None:
+        body = {
+            _Field.LINK: link, _Field.SOURCE: source.api_value, _Field.TITLE: title,
+            _Field.COMPANY: company, _Field.PUBLISHED: published, _Field.ATTEMPTS: 0}
+        if description is None:
+            body[_Field.STATUS] = DescriptionStatus.PENDING.api_value
+        else:
+            body[_Field.STATUS] = DescriptionStatus.SAVED.api_value
+            body[_Field.DESCRIPTION] = description
+            body[_Field.FINISHED_AT] = _format_date(datetime.now(timezone.utc))
+        try:
+            self._request("POST", self._records(Collection.JOB_DESCRIPTIONS), json=body)
+        except _NotUnique:
+            pass
+
+    def pending_descriptions(self) -> list[JobDescription]:
+        rows = self._list_all(
+            Collection.JOB_DESCRIPTIONS,
+            filter=f"{_Field.STATUS} = {_quote(DescriptionStatus.PENDING.api_value)}")
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        tried: list[tuple[datetime, JobDescription]] = []
+        fresh: list[tuple[datetime, JobDescription]] = []
+        for row in rows:
+            if DescriptionStatus.from_api(row.get(_Field.STATUS)) is not DescriptionStatus.PENDING:
+                continue
+            created = _parse_date(row.get(_Field.CREATED))
+            last_try_at = _parse_date(row.get(_Field.LAST_TRY_AT))
+            job = JobDescription(
+                id=row[_Field.ID], link=row.get(_Field.LINK, ""),
+                source=Source.from_api(row.get(_Field.SOURCE)),
+                title=row.get(_Field.TITLE, ""), company=row.get(_Field.COMPANY, ""),
+                published=row.get(_Field.PUBLISHED, ""),
+                attempts=int(row.get(_Field.ATTEMPTS) or 0),
+                first_try_at=_parse_date(row.get(_Field.FIRST_TRY_AT)), created=created)
+            if job.attempts > 0:
+                tried.append((last_try_at or oldest, job))
+            else:
+                fresh.append((created or oldest, job))
+        tried.sort(key=lambda item: item[0])
+        fresh.sort(key=lambda item: item[0], reverse=True)
+        return [job for _, job in tried] + [job for _, job in fresh]
+
+    def save_description(self, record_id: str, text: str, seniority: str,
+                         employment_type: str, at: datetime) -> None:
+        finished = _format_date(at)
+        self._request("PATCH", self._records(Collection.JOB_DESCRIPTIONS, record_id), json={
+            _Field.DESCRIPTION: text, _Field.SENIORITY: seniority,
+            _Field.EMPLOYMENT_TYPE: employment_type,
+            _Field.STATUS: DescriptionStatus.SAVED.api_value, _Field.FINISHED_AT: finished})
+
+    def mark_description_try(self, record_id: str, attempts: int, at: datetime) -> None:
+        tried = _format_date(at)
+        path = self._records(Collection.JOB_DESCRIPTIONS, record_id)
+        row = self._request("GET", path) or {}
+        body: dict = {_Field.ATTEMPTS: attempts, _Field.LAST_TRY_AT: tried}
+        if not row.get(_Field.FIRST_TRY_AT):
+            body[_Field.FIRST_TRY_AT] = tried
+        self._request("PATCH", path, json=body)
+
+    def finish_description(self, record_id: str, status: DescriptionStatus, at: datetime) -> None:
+        if status not in FINISHED_STATUSES:
+            raise ValueError(f"not a finishing status: {status}")
+        finished = _format_date(at)
+        self._request("PATCH", self._records(Collection.JOB_DESCRIPTIONS, record_id), json={
+            _Field.STATUS: status.api_value, _Field.FINISHED_AT: finished})
+
+    def description_links(self) -> set[str]:
+        rows = self._list_all(Collection.JOB_DESCRIPTIONS, fields=_Field.LINK)
+        return {row[_Field.LINK] for row in rows}
 
     # -- transport -----------------------------------------------------
 
