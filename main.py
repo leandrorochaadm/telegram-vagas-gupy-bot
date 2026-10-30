@@ -20,7 +20,7 @@ import linkedin_posts
 import programathor
 import remotar
 import web_search
-from store import Source, Store, StoreError, StoreFailure, from_env
+from store import DescriptionStatus, Source, Store, StoreError, StoreFailure, from_env
 
 try:
     from bs4 import BeautifulSoup
@@ -365,6 +365,12 @@ ALERT_SENT_NOT_SAVED = "uma vaga foi enviada mas não ficou registrada: {title}.
 ALERT_DUPLICATE_NOT_SAVED = "uma vaga repetida não ficou registrada: {title}. Ela pode chegar repetida uma vez."
 ALERT_DESCRIPTION_NOT_QUEUED = "a descrição de uma vaga não vai ser guardada: {title}."
 ALERT_BACKFILL_NOT_DONE = "Não foi possível recuperar as descrições das vagas antigas: {error}. Rode de novo."
+ALERT_DESCRIPTIONS_GAVE_UP = "Fiquei sem a descrição destas vagas depois de 3 dias tentando: {titles}."
+ALERT_DESCRIPTIONS_NOT_FETCHED = "Não foi possível buscar as descrições das vagas: {error}. Tento de novo na próxima rodada."
+DIAS_TENTATIVA_DESCRICAO = 3
+MAX_DESCRICOES_POR_RODADA = 40
+ORCAMENTO_DESCRICOES_S = 8 * 60
+PAUSA_ENTRE_DESCRICOES_LINKEDIN = 2
 ALERT_QUEUE_NOT_SENT = "Não foi possível enviar as vagas da fila: {error}. Elas vão na próxima execução."
 
 def queue_job(db: Store, link, titulo, empresa, data_f, mensagem, fonte: Source):
@@ -410,6 +416,57 @@ def recuperar_descricoes_antigas(db: Store) -> int:
         total += 1
     print(f"📝 {total} vagas antigas entraram na fila de descrição.")
     return total
+
+def buscar_descricoes(db: Store, agora: datetime | None = None, pausa=time.sleep, relogio=time.monotonic) -> None:
+    """Fetch the page of every pending job: save it, close it, count a try or give up after a few days."""
+    agora = agora or datetime.now(timezone.utc)
+    inicio = relogio()
+    limite = timedelta(days=DIAS_TENTATIVA_DESCRICAO)
+    desistencias: list[str] = []
+    salvas = encerradas = falhas = pedidos = 0
+    linkedin_bloqueado = False
+    pedidos_linkedin = 0
+    try:
+        for d in db.pending_descriptions():
+            if d.attempts > 0 and d.first_try_at is not None and agora - d.first_try_at >= limite:
+                db.finish_description(d.id, DescriptionStatus.GAVE_UP, agora)
+                desistencias.append(d.title[:60])
+                continue
+            fonte = job_details.source_from_link(d.link)
+            if fonte == Source.LINKEDIN_POSTS:
+                db.save_description(d.id, d.title, "", "", agora)
+                salvas += 1
+                continue
+            e_linkedin = fonte == Source.LINKEDIN
+            if e_linkedin and linkedin_bloqueado:
+                continue
+            if pedidos >= MAX_DESCRICOES_POR_RODADA:
+                continue
+            if relogio() - inicio >= ORCAMENTO_DESCRICOES_S:
+                break
+            if e_linkedin and pedidos_linkedin > 0:
+                pausa(PAUSA_ENTRE_DESCRICOES_LINKEDIN)
+            pedidos += 1
+            pedidos_linkedin += e_linkedin
+            try:
+                details = job_details.fetch_details(d.link, user_agent=USER_AGENT, proxy=SCRAPER_PROXY)
+            except job_details.DetailsError as erro:
+                if erro.kind == job_details.DetailsFailure.CLOSED:
+                    db.finish_description(d.id, DescriptionStatus.CLOSED, agora)
+                    encerradas += 1
+                    continue
+                db.mark_description_try(d.id, d.attempts + 1, agora)
+                falhas += 1
+                if erro.kind == job_details.DetailsFailure.BLOCKED and e_linkedin:
+                    linkedin_bloqueado = True
+                continue
+            db.save_description(d.id, details.text, details.seniority, details.employment_type, agora)
+            salvas += 1
+    finally:
+        if desistencias:
+            anotar_avisos(Source.BOT, [ALERT_DESCRIPTIONS_GAVE_UP.format(titles=resumir_lista(desistencias))])
+    print(f"📝 Descrições: {salvas} salvas, {encerradas} encerradas, {falhas} com falha, "
+          f"{len(desistencias)} desistências.")
 
 def registrar_e_enviar(db: Store, link, titulo, empresa, data_f, mensagem, fonte: Source):
     if _queue_jobs:
@@ -1193,6 +1250,7 @@ def parse_args(argv):
     mode.add_argument("--send-alerts", action="store_true", help="envia os avisos guardados")
     mode.add_argument("--backfill-descriptions", action="store_true",
                       help="cria a fila de descrição das vagas já enviadas")
+    mode.add_argument("--fetch-descriptions", action="store_true", help="busca a descrição das vagas enviadas")
     mode.add_argument("--check-proxy", action="store_true", help="confere o WARP antes da rodada")
     parser.add_argument("--send-now", action="store_true", help="com --source: envia cada vaga assim que encontrada")
     parser.add_argument("--defer-unreachable", action="store_true",
@@ -1237,13 +1295,15 @@ def main(argv=()):
             enviar_telegram(montar_aviso(_avisos))
         return EXIT_PROXY_DOWN
 
-    if args.source and os.getenv(ENV_REQUIRE_SCRAPER_PROXY) == "true" and not SCRAPER_PROXY:
+    if (args.source or args.fetch_descriptions) and os.getenv(ENV_REQUIRE_SCRAPER_PROXY) == "true" \
+            and not SCRAPER_PROXY:
         # --check-proxy already alerted at the start of the round
-        print("❌ SCRAPER_PROXY vazio com REQUIRE_SCRAPER_PROXY=true: a fonte não roda.")
+        print("❌ SCRAPER_PROXY vazio com REQUIRE_SCRAPER_PROXY=true: este passo não roda.")
         sys.exit(EXIT_PROXY_DOWN)
 
     # Parallel jobs only save their problems: the --send-alerts step sends one alert for all
-    parallel_step = bool(args.source or args.failed or args.send_jobs or args.backfill_descriptions)
+    parallel_step = bool(args.source or args.failed or args.send_jobs or args.backfill_descriptions
+                         or args.fetch_descriptions)
     # Full run (local) by default; the workflow runs each step in its own job
     if args.source:
         sources = [args.source]
@@ -1268,6 +1328,12 @@ def main(argv=()):
             recuperar_descricoes_antigas(db)
         except StoreError as e:
             anotar_avisos(Source.BOT, [ALERT_BACKFILL_NOT_DONE.format(error=e)])
+
+    if args.fetch_descriptions:
+        try:
+            buscar_descricoes(db)
+        except StoreError as e:
+            anotar_avisos(Source.BOT, [ALERT_DESCRIPTIONS_NOT_FETCHED.format(error=e)])
 
     if args.failed:
         anotar_avisos(SOURCES[args.failed][1], [AVISO_FONTE_INTERROMPIDA])
