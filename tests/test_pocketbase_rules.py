@@ -9,6 +9,7 @@ from pocketbase_server import PocketBaseServer, pocketbase_bin  # noqa: E402
 
 DATE = "2026-10-24 12:00:00.000Z"
 LONG_TEXT = "x" * 6000
+LONG_DESCRIPTION = "x" * 50_000
 BLOCKED_LIST_STATUSES = (200, 403)
 BLOCKED_STATUSES = (404, 403)
 BLOCKED_CREATE_STATUSES = (400, 403)
@@ -30,6 +31,15 @@ VALID_BODIES: dict[str, dict] = {
     "linkedin_sessions": {"cookie_hash": "hash-{tag}", "searched_at": DATE},
     "inhire_tenants": {"slug": "slug-{tag}", "found_at": DATE},
     "inhire_discoveries": {"last_run": DATE, "found": 3},
+    "job_descriptions": {
+        "link": "https://example.com/{tag}",
+        "source": "gupy",
+        "title": "Title {tag}",
+        "company": "Company",
+        "published": "2026-10-24",
+        "status": "pending",
+        "attempts": 0,
+    },
 }
 # Field changed by the update probe, per collection.
 UPDATE_FIELDS: dict[str, tuple[str, object]] = {
@@ -41,6 +51,7 @@ UPDATE_FIELDS: dict[str, tuple[str, object]] = {
     "linkedin_sessions": ("expired_at", "2026-10-25 12:00:00.000Z"),
     "inhire_tenants": ("found_at", "2026-10-25 12:00:00.000Z"),
     "inhire_discoveries": ("found", 7),
+    "job_descriptions": ("status", "saved"),
 }
 
 
@@ -205,6 +216,7 @@ class UniqueIndexTest(PocketBaseRulesTestCase):
             ("brave_searches", "label"),
             ("linkedin_sessions", "cookie_hash"),
             ("inhire_tenants", "slug"),
+            ("job_descriptions", "link"),
         ):
             with self.subTest(collection=collection):
                 body = body_for(collection, "dup")
@@ -239,6 +251,18 @@ class LongTextTest(PocketBaseRulesTestCase):
                 self.assertEqual(response.status_code, 200, response.text)
                 stored = self.server.get_record(collection, response.json()["id"])
                 self.assertEqual(len(stored[field]), len(LONG_TEXT))
+
+    def test_long_description_is_accepted(self) -> None:
+        body = {
+            **body_for("job_descriptions", "long"),
+            "description": LONG_DESCRIPTION,
+            "status": "saved",
+            "finished_at": DATE,
+        }
+        response = self.req("POST", records_path("job_descriptions"), self.bot_token, json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        stored = self.server.get_record("job_descriptions", response.json()["id"])
+        self.assertEqual(len(stored["description"]), len(LONG_DESCRIPTION))
 
 
 if __name__ == "__main__":
