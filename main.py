@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import gupy
+from env_file import load_env_file
 from http_proxy import scraper_proxies, warp_is_on
 import inhire_discovery
 import job_details  # module import, so tests can patch main.job_details.fetch_details
@@ -35,15 +36,7 @@ AVISO_SEM_BS4 = "LinkedIn desligado: falta instalar o beautifulsoup4 (pip instal
 DIRETORIO_ATUAL = os.path.dirname(os.path.abspath(__file__))
 
 def carregar_env():
-    caminho = os.path.join(DIRETORIO_ATUAL, '.env')
-    if not os.path.exists(caminho):
-        return
-    with open(caminho) as f:
-        for linha in f:
-            linha = linha.strip()
-            if linha and not linha.startswith('#') and '=' in linha:
-                chave, valor = linha.split('=', 1)
-                os.environ.setdefault(chave.strip(), valor.strip())
+    load_env_file(os.path.join(DIRETORIO_ATUAL, '.env'))
 
 carregar_env()
 
