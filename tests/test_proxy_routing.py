@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gupy  # noqa: E402
 import inhire_discovery  # noqa: E402
+import job_details  # noqa: E402
 import linkedin_login  # noqa: E402
 import main  # noqa: E402
 import remotar  # noqa: E402
@@ -116,6 +117,20 @@ class MainRequestsTest(unittest.TestCase):
         for fake in (g, r, d):
             self.assertEqual(fake.call_args.kwargs["proxy"], PROXY)
         self.assertEqual(p.call_args.kwargs["proxy"], PROXY)
+
+
+class JobDetailsRequestsTest(unittest.TestCase):
+
+    def test_fetch_details_uses_proxy_and_user_agent(self):
+        with mock.patch.object(job_details.requests, "get", return_value=ok(payload={"description": "<p>x</p>"})) as get:
+            job_details.fetch_details("https://remotar.com.br/job/1", user_agent="UA", proxy=PROXY)
+        self.assertEqual(get.call_args.kwargs["proxies"], PROXIES)
+        self.assertEqual(get.call_args.kwargs["headers"]["User-Agent"], "UA")
+
+    def test_fetch_details_without_proxy(self):
+        with mock.patch.object(job_details.requests, "get", return_value=ok(payload={"description": "<p>x</p>"})) as get:
+            job_details.fetch_details("https://remotar.com.br/job/1", user_agent="UA", proxy=None)
+        self.assertIsNone(get.call_args.kwargs["proxies"])
 
 
 if __name__ == "__main__":
