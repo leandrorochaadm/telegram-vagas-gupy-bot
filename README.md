@@ -123,7 +123,9 @@ python main.py
 
 ## 🗄️ Banco de dados (PocketBase)
 
-O bot guarda o estado no PocketBase: vagas enviadas (`sent_jobs`), fila (`queued_jobs`), avisos (`alerts`, `alert_sends`), cota da Brave (`brave_searches`), sessão do LinkedIn (`linkedin_sessions`) e empresas da InHire (`inhire_tenants`, `inhire_discoveries`). Só a conta de login `bot_accounts` acessa, e não há cadastro pela API.
+O bot guarda o estado no PocketBase: vagas enviadas (`sent_jobs`), fila (`queued_jobs`), avisos (`alerts`, `alert_sends`), cota da Brave (`brave_searches`), sessão do LinkedIn (`linkedin_sessions`) empresas da InHire (`inhire_tenants`, `inhire_discoveries`) e descrições completas das vagas enviadas (`job_descriptions`). Só a conta de login `bot_accounts` acessa, e não há cadastro pela API.
+
+Cada vaga enviada ganha um registro pendente em `job_descriptions`. O passo de busca lê a página da vaga pelo WARP e salva o texto (`saved`). Sem sucesso, tenta de novo nas rodadas seguintes por 3 dias, contados da primeira tentativa; depois disso o status vira `gave_up`. Vaga encerrada fica `closed`. Publicação do LinkedIn já nasce `saved`, com o texto do post.
 
 | Variável | O que é |
 |---|---|
@@ -451,6 +453,15 @@ Cada site roda num job próprio, todos ao mesmo tempo. Se um site travar ou der 
 Como o envio acontece num lugar só, a mesma vaga achada em dois sites chega uma vez só ao grupo (vale a mensagem do site dedicado, que vem antes da web). Vaga que o Telegram recusar fica na fila e é enviada na próxima execução. Job que falha antes de rodar o bot (ex.: instalação quebrada) não manda aviso próprio, só aparece vermelho no GitHub.
 
 Para rodar localmente, `python main.py` continua buscando em todos os sites, um depois do outro. Para um site só: `python main.py --source gupy` (opções em `python main.py --help`).
+
+Descrições das vagas:
+
+```bash
+python main.py --fetch-descriptions     # busca e guarda a descrição das vagas pendentes (até 40 por vez, pelo WARP)
+python main.py --backfill-descriptions  # cria pendências para vagas enviadas antes desta função; rode uma vez
+```
+
+As descrições das vagas antigas chegam nas rodadas seguintes.
 
 ---
 

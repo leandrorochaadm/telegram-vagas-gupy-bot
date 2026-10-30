@@ -59,6 +59,12 @@ Units:
 ! sudo systemctl daemon-reload
 ```
 
+## Rodada
+
+Ordem dos passos: `--check-proxy` → fontes (e `--failed` para as que falharam) → `--send-jobs` →
+`--fetch-descriptions` (até 10 min, só com o WARP no ar) → `--send-alerts`. Se o passo de descrições falhar ou
+estourar o tempo, a rodada não fica vermelha.
+
 ## Rodar à mão (antes do `enable`)
 
 ```bash
@@ -104,6 +110,30 @@ git -C /opt/vagas-bot/app pull --ff-only
 
 Se o `requirements.txt` mudou, rodar o `uv pip install` de novo. Se mudou a versão do `playwright`, reinstalar o
 Chromium com o mesmo `PLAYWRIGHT_BROWSERS_PATH`.
+
+### Quando entra migration nova
+
+1. Aplicar pelo `pb_provision.py`, primeiro com `--dry-run` e depois sem:
+
+```bash
+sudo python3 /home/deploy/.claude/skills/publish-pocketbase-pwa/scripts/pb_provision.py --app job-search --api-host job-search-api.tektonsoftware.com.br --pb-version 0.40.5 --migrations /opt/vagas-bot/app/pocketbase/pb_migrations --origin https://job-search.tektonsoftware.com.br --private-superuser --skip-deploy-key --dry-run
+```
+
+2. Conferir no painel (túnel `ssh -N -L 8093:127.0.0.1:8093 hostinger`) que a coleção `job_descriptions` existe.
+
+### Descrições das vagas antigas (uma vez)
+
+Rodar com o mesmo ambiente da unit, num subshell para não deixar as variáveis no terminal:
+
+```bash
+( cd /opt/vagas-bot/app && set -a && . /etc/vagas-bot/bot.env && set +a && /opt/vagas-bot/venv/bin/python main.py --backfill-descriptions )
+```
+
+Imprime o total de pendências criadas. Centenas de pendentes levam várias rodadas (40 por rodada). Rodar de novo
+não duplica.
+
+Prova contra os sites reais: rodar `main.py --fetch-descriptions` do mesmo jeito e conferir no painel que uma vaga
+de cada fonte ficou `saved`.
 
 ## Desligar
 
