@@ -5,11 +5,14 @@ Run: python -m unittest discover -s tests -v
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import job_analysis as ja  # noqa: E402
-from description_extractor import Education, EnglishLevel, Knockout, Requirement, ResumeCoverage, WorkModel  # noqa: E402
+from description_extractor import (  # noqa: E402
+    Education, EnglishLevel, Knockout, Requirement, ResumeCoverage, ResumeProfile, WorkModel,
+)
 from job_analysis import Category, ItemOrigin, JobItems, RankedItem  # noqa: E402
 
 KNOCKOUT = Knockout(min_years=None, english=EnglishLevel.UNKNOWN, education=Education.UNKNOWN,
@@ -196,6 +199,244 @@ class NgramTests(unittest.TestCase):
         self.assertIn("gestao de times", result)
         many = {"1": " ".join(f"w{i} x{i}" for i in range(40))}
         self.assertEqual(len(ja.frequent_ngrams(many, set())), 30)
+
+
+# --- knockout summary and report -------------------------------------------------------------------------------
+
+EL, ED, WM = EnglishLevel, Education, WorkModel
+P, S, M, U = ResumeCoverage.PRESENT, ResumeCoverage.SYNONYM, ResumeCoverage.MISSING, ResumeCoverage.UNKNOWN
+
+
+def knockout(years=None, english=EL.UNKNOWN, education=ED.UNKNOWN, work_model=WM.UNKNOWN):
+    return Knockout(min_years=years, english=english, education=education, work_model=work_model)
+
+
+def profile(years=None, english=EL.UNKNOWN, education=ED.UNKNOWN):
+    return ResumeProfile(years=years, english=english, education=education, coverage={})
+
+
+def report(**overrides):
+    values = dict(
+        generated_at=datetime(2026, 11, 20, 12, 30, tzinfo=timezone.utc), total_jobs=20, senior_jobs=0,
+        duplicate_jobs=0, skipped_jobs=0, pending_jobs=0, filters="", items=[], learned_now=[],
+        discarded_phrases=[], knockout=ja.summarize_knockout([], None), resume=profile(), resume_check_failed=False,
+    )
+    values.update(overrides)
+    return ja.Report(**values)
+
+
+def ranked(name, category=Category.TECHNOLOGY, share=0.5, required_share=None, weight=None, senior_share=0.0,
+           coverage=None, resume_term="", origin=ItemOrigin.DICTIONARY, jobs=1, metadata_only=False):
+    required = share if required_share is None else required_share
+    return RankedItem(category, name, jobs, share, required, share if weight is None else weight, senior_share,
+                      coverage, resume_term, origin, metadata_only)
+
+
+def knockout_report(jobs_knockouts, resume, **overrides):
+    jobs = [job(str(i), knockout=k) for i, k in enumerate(jobs_knockouts)]
+    return report(total_jobs=len(jobs), knockout=ja.summarize_knockout(jobs, resume), resume=resume, **overrides)
+
+
+class KnockoutSummaryTests(unittest.TestCase):
+    def test_meets_years_share_limit(self):
+        jobs = [job("1", knockout=knockout(years=y)) for y in (8, 3, 6)] + [job("4")]
+        summary = ja.summarize_knockout(jobs, profile(years=6))
+        self.assertEqual(summary.years_asked, [3, 6, 8])
+        self.assertAlmostEqual(summary.meets_years_share, 2 / 3)
+        text = ja.render_markdown(report(knockout=summary, total_jobs=4))
+        self.assertIn("Você atende **67%** das vagas em tempo de experiência.", text)
+
+    def test_meets_years_share_none(self):
+        no_years = [job("1")]
+        with_years = [job("1", knockout=knockout(years=3))]
+        self.assertIsNone(ja.summarize_knockout(no_years, profile(years=5)).meets_years_share)
+        self.assertIsNone(ja.summarize_knockout(with_years, profile(years=None)).meets_years_share)
+        self.assertIsNone(ja.summarize_knockout(with_years, None).meets_years_share)
+        text = ja.render_markdown(report(knockout=ja.summarize_knockout(no_years, profile(years=5))))
+        self.assertIn("**Anos de experiência:** nenhuma vaga informa.", text)
+        self.assertNotIn("Você atende", text)
+
+    def test_knockout_unknown_values(self):
+        jobs = [job("1"), job("2")]
+        summary = ja.summarize_knockout(jobs, None)
+        self.assertEqual(summary.english[EL.UNKNOWN], 2)
+        self.assertEqual(summary.education[ED.UNKNOWN], 2)
+        self.assertEqual(summary.work_model[WM.UNKNOWN], 2)
+        self.assertEqual(summary.english_asked_share, 0.0)
+        text = ja.render_markdown(report(knockout=summary, total_jobs=2))
+        self.assertIn("2 vagas não informam.", text)
+        empty = ja.summarize_knockout([], None)
+        self.assertEqual((empty.years_asked, empty.english_asked_share, empty.education_asked_share), ([], 0.0, 0.0))
+        self.assertEqual(set(empty.english), set(EL))
+
+    def test_knockout_share_base_is_all_jobs(self):
+        ks = [knockout(english=EL.INTERMEDIATE)] * 30 + [knockout(english=EL.NONE)] * 10 + [knockout()] * 60
+        summary = ja.summarize_knockout([job(str(i), knockout=k) for i, k in enumerate(ks)], None)
+        self.assertAlmostEqual(summary.english_asked_share, 0.3)
+        text = ja.render_markdown(knockout_report(ks, profile()))
+        self.assertIn("**Inglês:** 30% pedem intermediário. 60 vagas não informam.", text)
+        self.assertIn("⚠️ Seu currículo não informa o nível de inglês, e 30% das vagas pedem.", text)
+        ks = [knockout(education=ED.NOT_REQUIRED)] * 5
+        summary = ja.summarize_knockout([job(str(i), knockout=k) for i, k in enumerate(ks)], None)
+        self.assertEqual(summary.education_asked_share, 0.0)
+        self.assertIn("**Formação:** nenhuma vaga pede.", ja.render_markdown(knockout_report(ks, None)))
+
+    def test_undeclared_knockout_warning_threshold(self):
+        def build(asking, resume):
+            ks = [knockout(english=EL.ADVANCED)] * asking + [knockout()] * (100 - asking)
+            return ja.render_markdown(knockout_report(ks, resume))
+
+        self.assertIn("⚠️ Seu currículo não informa o nível de inglês, e 30% das vagas pedem. Declare, se tiver.",
+                      build(30, profile()))
+        self.assertNotIn("não informa o nível de inglês", build(29, profile()))
+        ks = ([knockout(education=ED.BACHELOR, years=3)] * 30 + [knockout(education=ED.BACHELOR)] * 10
+              + [knockout(english=EL.BASIC)] * 60)
+        text = ja.render_markdown(knockout_report(ks, profile(english=EL.FLUENT)))
+        self.assertIn("⚠️ Seu currículo não informa a formação, e 40% das vagas pedem.", text)
+        self.assertIn("⚠️ Seu currículo não informa o tempo de experiência, e 30% das vagas pedem.", text)
+        self.assertNotIn("nível de inglês", text)
+
+
+class ReportTests(unittest.TestCase):
+    def full_report(self):
+        items = [
+            ranked("Flutter", share=0.9, coverage=P),
+            ranked("Dart", share=0.8, coverage=P),
+            ranked("Trabalho em equipe", Category.SKILL, share=0.5, weight=0.5, coverage=S,
+                   resume_term="trabalho em grupo"),
+            ranked("GraphQL", share=0.4, weight=0.4, coverage=M),
+            ranked("Mentorar", Category.RESPONSIBILITY, share=0.2, senior_share=0.6, coverage=S,
+                   resume_term="code review"),
+        ]
+        return report(items=items, senior_jobs=10, learned_now=[("Rive", 4), ("Lottie", 7)],
+                      discarded_phrases=[("ambiente de producao", 41), ("experiencia comprovada", 33)],
+                      resume=profile(years=5), filters="pleno")
+
+    def test_render_markdown_sections_in_order(self):
+        text = ja.render_markdown(self.full_report())
+        self.assertTrue(text.startswith("# Análise das vagas — 20/11/2026 09:30\n"))
+        self.assertTrue(text.endswith("\n"))
+        titles = ["## Cobertura do seu currículo", "## Critérios eliminatórios", "## O que ajustar primeiro",
+                  "## Diferenciais das vagas sênior", "## Para o perfil da Gupy e do LinkedIn",
+                  "## Tecnologias mais pedidas", "## Habilidades mais pedidas", "## Responsabilidades mais pedidas",
+                  "## Tecnologias aprendidas nesta análise", "## Expressões descartadas"]
+        positions = [text.index(title) for title in titles]
+        self.assertEqual(positions, sorted(positions))
+        with self.assertRaises(ValueError):
+            ja.render_markdown(report(generated_at=datetime(2026, 11, 20, 12, 30)))
+
+    def test_header_counts_and_filters(self):
+        text = ja.render_markdown(report(total_jobs=148, duplicate_jobs=12, skipped_jobs=3, pending_jobs=0))
+        self.assertIn("**148 vagas analisadas** · 12 repetidas foram juntadas · filtros: nenhum", text)
+        self.assertIn("3 vagas não puderam ser analisadas. 0 ficaram para a próxima análise.", text)
+        text = ja.render_markdown(report(total_jobs=1, duplicate_jobs=1, skipped_jobs=1, pending_jobs=1, filters=" x "))
+        self.assertIn("**1 vaga analisada** · 1 repetida foi juntada · filtros: x", text)
+        self.assertIn("1 vaga não pôde ser analisada. 1 ficou para a próxima análise.", text)
+
+    def test_small_sample_warning(self):
+        warning = "⚠️ Amostra pequena: com menos de 20 vagas o ranking ainda muda muito."
+        self.assertIn(warning, ja.render_markdown(report(total_jobs=19)))
+        self.assertNotIn(warning, ja.render_markdown(report(total_jobs=20)))
+
+    def test_synonym_suggests_vacancy_wording(self):
+        text = ja.render_markdown(self.full_report())
+        self.assertIn("↔️ troque “trabalho em grupo” por “Trabalho em equipe”", text)
+        self.assertIn("❌ só inclua se você tiver essa experiência", text)
+        adjust = text.split("## O que ajustar primeiro")[1].split("## Diferenciais")[0]
+        self.assertNotIn("Flutter", adjust)
+        self.assertLess(adjust.index("Trabalho em equipe"), adjust.index("GraphQL"))
+        self.assertIn("| 1 | Trabalho em equipe |", adjust)
+        outside = [ranked(f"T{i:02d}", weight=1.0 - i / 100, coverage=P) for i in range(30)]
+        outside.append(ranked("Fora", weight=0.01, coverage=M))
+        adjust = ja.render_markdown(report(items=outside)).split("## O que ajustar primeiro")[1]
+        self.assertIn("Nada a ajustar entre os itens mais pedidos.", adjust.split("##")[0])
+
+    def test_metadata_only_technology(self):
+        text = ja.render_markdown(report(items=[ranked("Codemagic", coverage=M, metadata_only=True)]))
+        self.assertIn("❌ está só nas palavras-chave do PDF; coloque no texto", text)
+
+    def test_report_without_resume(self):
+        items = [ranked("Flutter", coverage=None)]
+        ks = ja.summarize_knockout([job("1", knockout=knockout(english=EL.ADVANCED))], None)
+        text = ja.render_markdown(report(items=items, resume=None, knockout=ks, total_jobs=1))
+        for absent in ("## Cobertura do seu currículo", "## O que ajustar primeiro", "## Para o perfil",
+                       "No currículo", "Você atende", "⚠️ Seu currículo"):
+            self.assertNotIn(absent, text)
+        self.assertIn("## Critérios eliminatórios", text)
+        self.assertIn("| Flutter | 1 | 50% | 50% | 0% |", text)
+
+    def test_coverage_not_compared_when_resume_check_failed(self):
+        items = [ranked("Flutter", coverage=P), ranked("Comunicação", Category.SKILL, coverage=U)]
+        text = ja.render_markdown(report(items=items, resume=None, resume_check_failed=True))
+        self.assertIn("| Habilidades | não comparado |", text)
+        self.assertIn("| Responsabilidades | não comparado |", text)
+        self.assertIn("| Tecnologias | **100%** |", text)
+        self.assertIn("Não deu para comparar habilidades e responsabilidades com o currículo agora. "
+                      "Rode de novo mais tarde.", text)
+        for title in ("## O que ajustar primeiro", "## Para o perfil da Gupy e do LinkedIn"):
+            self.assertIn(title, text)
+        self.assertNotIn("⚠️ Seu currículo", text)
+
+    def test_ai_marker_in_tables(self):
+        items = [ranked("Melos", origin=ItemOrigin.AI), ranked("Rive", origin=ItemOrigin.LEARNED),
+                 ranked("Flutter", origin=ItemOrigin.DICTIONARY),
+                 ranked("Gestão de times", Category.RESPONSIBILITY, origin=ItemOrigin.FREQUENT)]
+        items += [ranked(f"H{i:02d}", Category.SKILL, weight=1.0 - i / 100) for i in range(31)]
+        text = ja.render_markdown(report(items=items))
+        self.assertIn("| Melos (detectada pela IA) |", text)
+        self.assertIn("| Gestão de times (detectada pela IA) |", text)
+        self.assertIn("| Rive |", text)
+        self.assertIn("| Flutter |", text)
+        skills = text.split("## Habilidades mais pedidas")[1].split("## Responsabilidades")[0]
+        self.assertEqual(skills.count("| H0") + skills.count("| H1") + skills.count("| H2") + skills.count("| H3"), 30)
+        self.assertEqual(ja.render_markdown(report()).count("Nenhum item."), 3)
+
+    def test_pipe_in_name_is_escaped(self):
+        text = ja.render_markdown(report(items=[ranked("A|B")]))
+        self.assertIn("| A\\|B |", text)
+
+    def test_learned_and_discarded_sections(self):
+        text = ja.render_markdown(report())
+        self.assertIn("Nenhuma tecnologia nova nesta análise.", text)
+        self.assertIn("Nenhuma expressão descartada.", text)
+        text = ja.render_markdown(self.full_report())
+        self.assertIn("Lottie (7 vagas) · Rive (4)", text)
+        self.assertIn('"ambiente de producao" (41 vagas) · "experiencia comprovada" (33)', text)
+
+    def test_differentials_section(self):
+        text = ja.render_markdown(report(senior_jobs=0, items=[ranked("A", senior_share=0.0)]))
+        self.assertIn("0 vagas sênior.", text)
+        self.assertIn("Nenhum diferencial claro nas vagas sênior.", text)
+        text = ja.render_markdown(self.full_report())
+        self.assertIn("10 vagas sênior.", text)
+        self.assertIn("| Mentorar | 60% | 20% | ↔️ “code review” |", text)
+
+    def test_profile_section(self):
+        text = ja.render_markdown(report(items=[ranked("Flutter", coverage=M)]))
+        self.assertIn("Nenhuma competência do seu currículo aparece entre as mais pedidas.", text)
+        text = ja.render_markdown(self.full_report())
+        self.assertIn("`Flutter` · `Dart`", text)
+
+
+class CsvTests(unittest.TestCase):
+    def test_render_csv(self):
+        items = [
+            ranked("Flutter", share=0.375, weight=0.4, coverage=S, resume_term="flutter sdk"),
+            ranked("Comunicação", Category.SKILL, share=0.2, weight=0.2),
+            ranked("Dart", share=0.1, weight=0.9, coverage=None),
+        ]
+        lines = ja.render_csv(report(items=items)).split("\n")
+        self.assertEqual(lines[0], "categoria,item,origem,vagas,percentual,percentual_obrigatorio,peso,"
+                                   "percentual_senior,no_curriculo,palavra_no_curriculo")
+        self.assertEqual(lines[1], "technology,Dart,dictionary,1,10.0,10.0,90.0,0.0,,")
+        self.assertEqual(lines[2], "technology,Flutter,dictionary,1,37.5,37.5,40.0,0.0,synonym,flutter sdk")
+        self.assertTrue(lines[3].startswith("skill,Comunicação"))
+        many = [ranked(f"T{i:02d}") for i in range(35)]
+        self.assertEqual(len(ja.render_csv(report(items=many)).splitlines()), 36)
+
+    def test_csv_includes_single_ai_technology(self):
+        text = ja.render_csv(report(items=[ranked("Melos", origin=ItemOrigin.AI, jobs=1)]))
+        self.assertIn("technology,Melos,ai,1,", text)
 
 
 if __name__ == "__main__":

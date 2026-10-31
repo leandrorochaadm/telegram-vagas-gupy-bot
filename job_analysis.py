@@ -2,13 +2,26 @@
 
 Standard library only; no network, database or file access.
 """
+import csv
+import io
 import re
+import statistics
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
-from description_extractor import Knockout, Requirement, ResumeCoverage
+from description_extractor import (
+    Education,
+    EnglishLevel,
+    Knockout,
+    Requirement,
+    ResumeCoverage,
+    ResumeProfile,
+    WorkModel,
+)
 from tech_terms import MAX_TERM_CHARS, find_technologies, normalize
 
 
@@ -49,6 +62,8 @@ STOPWORDS: frozenset[str] = frozenset(
     "como mais ser the and or of to in on for with an is are be our you your".split()
 )
 _EPSILON = 1e-9  # tolerance for fraction comparisons
+KNOCKOUT_WARNING_SHARE = 0.30
+REPORT_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 
 _PRESENT_COVERAGE = (ResumeCoverage.PRESENT, ResumeCoverage.SYNONYM)
 
@@ -333,3 +348,379 @@ def frequent_ngrams(texts: dict[str, str], known: set[str]) -> dict[str, frozens
 def _normalize_lines(text: str) -> str:
     """Like `normalize` but keeps line breaks, which end a phrase."""
     return "\n".join(normalize(line) for line in text.splitlines())
+
+
+# --- knockout criteria summary ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class KnockoutSummary:
+    years_asked: list[int]
+    meets_years_share: float | None
+    english: dict[EnglishLevel, int]
+    education: dict[Education, int]
+    work_model: dict[WorkModel, int]
+    english_asked_share: float
+    education_asked_share: float
+
+
+def summarize_knockout(jobs: list[JobItems], resume: ResumeProfile | None) -> KnockoutSummary:
+    years_asked = sorted(job.knockout.min_years for job in jobs if job.knockout.min_years is not None)
+    meets: float | None = None
+    if resume is not None and resume.years is not None and years_asked:
+        meets = sum(1 for years in years_asked if years <= resume.years) / len(years_asked)
+    english = {level: 0 for level in EnglishLevel}
+    education = {level: 0 for level in Education}
+    work_model = {model: 0 for model in WorkModel}
+    for job in jobs:
+        english[job.knockout.english] += 1
+        education[job.knockout.education] += 1
+        work_model[job.knockout.work_model] += 1
+    total = len(jobs)
+    english_asked = sum(1 for job in jobs if job.knockout.english.at_least(EnglishLevel.BASIC))
+    education_asked = sum(1 for job in jobs if job.knockout.education.at_least(Education.TECHNICAL))
+    return KnockoutSummary(
+        years_asked=years_asked,
+        meets_years_share=meets,
+        english=english,
+        education=education,
+        work_model=work_model,
+        english_asked_share=english_asked / total if total else 0.0,
+        education_asked_share=education_asked / total if total else 0.0,
+    )
+
+
+# --- report ----------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Report:
+    generated_at: datetime
+    total_jobs: int
+    senior_jobs: int
+    duplicate_jobs: int
+    skipped_jobs: int
+    pending_jobs: int
+    filters: str
+    items: list[RankedItem]
+    learned_now: list[tuple[str, int]]
+    discarded_phrases: list[tuple[str, int]]
+    knockout: KnockoutSummary
+    resume: ResumeProfile | None
+    resume_check_failed: bool
+
+
+_ENGLISH_LABELS = {
+    EnglishLevel.NONE: "nenhum",
+    EnglishLevel.BASIC: "básico",
+    EnglishLevel.INTERMEDIATE: "intermediário",
+    EnglishLevel.ADVANCED: "avançado",
+    EnglishLevel.FLUENT: "fluente",
+    EnglishLevel.UNKNOWN: "não informado",
+}
+_EDUCATION_LABELS = {
+    Education.NOT_REQUIRED: "não exigida",
+    Education.TECHNICAL: "técnico",
+    Education.BACHELOR: "superior completo",
+    Education.POSTGRAD: "pós-graduação",
+    Education.UNKNOWN: "não informada",
+}
+_WORK_MODEL_LABELS = {
+    WorkModel.REMOTE: "remoto",
+    WorkModel.HYBRID: "híbrido",
+    WorkModel.ONSITE: "presencial",
+    WorkModel.UNKNOWN: "não informado",
+}
+_COVERAGE_MARKS = {
+    ResumeCoverage.PRESENT: "✅",
+    ResumeCoverage.SYNONYM: "↔️",
+    ResumeCoverage.MISSING: "❌",
+    ResumeCoverage.UNKNOWN: "—",
+}
+_CATEGORY_TITLES = {
+    Category.TECHNOLOGY: ("Tecnologias mais pedidas", "Tecnologia"),
+    Category.SKILL: ("Habilidades mais pedidas", "Habilidade"),
+    Category.RESPONSIBILITY: ("Responsabilidades mais pedidas", "Responsabilidade"),
+}
+_AI_ORIGINS = (ItemOrigin.AI, ItemOrigin.FREQUENT)
+_NOT_COMPARED = "não comparado"
+
+
+def _pct(fraction: float) -> str:
+    return f"{fraction * 100:.0f}%"
+
+
+def _cell(text: str) -> str:
+    return text.replace("|", "\\|")
+
+
+def _mark(coverage: ResumeCoverage | None) -> str:
+    return _COVERAGE_MARKS.get(coverage, "—") if coverage is not None else "—"
+
+
+def _table(headers: list[str], rows: list[list[str]]) -> str:
+    lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    return "\n".join(lines)
+
+
+def _count(number: int, singular: str, plural: str) -> str:
+    return f"{number} {singular if number == 1 else plural}"
+
+
+def _top(items: list[RankedItem], category: Category) -> list[RankedItem]:
+    return sorted((item for item in items if item.category == category), key=_sort_key)[:TOP_N]
+
+
+def _share_of(count: int, total: int) -> float:
+    return count / total if total else 0.0
+
+
+def _years_line(summary: KnockoutSummary) -> str:
+    years = summary.years_asked
+    if not years:
+        text = "nenhuma vaga informa."
+    elif years[0] == years[-1]:
+        text = f"as vagas pedem {_count(years[0], 'ano', 'anos')}."
+    else:
+        median = statistics.median(years)
+        text = f"as vagas pedem de {years[0]} a {years[-1]} anos (mediana: {f'{median:g}'.replace('.', ',')})."
+    line = f"- **Anos de experiência:** {text}"
+    if summary.meets_years_share is not None:
+        line += f" Você atende **{_pct(summary.meets_years_share)}** das vagas em tempo de experiência."
+    return line
+
+
+def _levels_line[L: (EnglishLevel, Education)](
+    title: str, asked_share: float, counts: dict[L, int], minimum: L, labels: dict[L, str], total: int
+) -> str:
+    shown = [(level, count) for level, count in counts.items() if level.at_least(minimum) and count > 0]
+    if not shown:
+        text = "nenhuma vaga pede."
+    elif len(shown) == 1:
+        text = f"{_pct(asked_share)} pedem {labels[shown[0][0]]}."
+    else:
+        parts = ", ".join(f"{labels[level]} {_pct(_share_of(count, total))}" for level, count in shown)
+        text = f"{_pct(asked_share)} pedem ({parts})."
+    unknown = next(count for level, count in counts.items() if level.rank < 0)
+    if unknown > 0:
+        text += f" {_count(unknown, 'vaga não informa', 'vagas não informam')}."
+    return f"- **{title}:** {text}"
+
+
+def _work_model_line(summary: KnockoutSummary, total: int) -> str:
+    parts = [
+        f"{_WORK_MODEL_LABELS[model]} {_pct(_share_of(summary.work_model[model], total))}"
+        for model in (WorkModel.REMOTE, WorkModel.HYBRID, WorkModel.ONSITE)
+        if summary.work_model[model] > 0
+    ]
+    if not parts:
+        return "- **Modelo de trabalho:** nenhuma vaga informa."
+    text = " · ".join(parts) + "."
+    unknown = summary.work_model[WorkModel.UNKNOWN]
+    if unknown > 0:
+        text += f" {_count(unknown, 'vaga não informa', 'vagas não informam')}."
+    return f"- **Modelo de trabalho:** {text}"
+
+
+def _undeclared_warning(criterion: str, share: float) -> str | None:
+    if share + _EPSILON < KNOCKOUT_WARNING_SHARE:
+        return None
+    return f"  ⚠️ Seu currículo não informa {criterion}, e {_pct(share)} das vagas pedem. Declare, se tiver."
+
+
+def _knockout_section(report: Report) -> str:
+    summary = report.knockout
+    total = report.total_jobs
+    english = _levels_line(
+        "Inglês", summary.english_asked_share, summary.english, EnglishLevel.BASIC, _ENGLISH_LABELS, total
+    )
+    education = _levels_line(
+        "Formação", summary.education_asked_share, summary.education, Education.TECHNICAL, _EDUCATION_LABELS, total
+    )
+    lines = [_years_line(summary), english, education, _work_model_line(summary, total)]
+    resume = report.resume
+    if resume is not None:
+        checks = [
+            (1, resume.english == EnglishLevel.UNKNOWN, "o nível de inglês", summary.english_asked_share),
+            (2, resume.education == Education.UNKNOWN, "a formação", summary.education_asked_share),
+            (0, resume.years is None, "o tempo de experiência", _share_of(len(summary.years_asked), total)),
+        ]
+        for index, undeclared, criterion, share in sorted(checks, reverse=True):
+            warning = _undeclared_warning(criterion, share) if undeclared else None
+            if warning is not None:
+                lines.insert(index + 1, warning)
+    return "## Critérios eliminatórios\n" + "\n".join(lines)
+
+
+def _adjust_section(report: Report) -> str:
+    categories = [Category.TECHNOLOGY] if report.resume_check_failed else list(Category)
+    candidates = [
+        item
+        for category in categories
+        for item in _top(report.items, category)
+        if item.coverage in (ResumeCoverage.MISSING, ResumeCoverage.SYNONYM)
+    ]
+    candidates.sort(key=_sort_key)
+    rows: list[list[str]] = []
+    for number, item in enumerate(candidates, start=1):
+        if item.coverage == ResumeCoverage.SYNONYM:
+            action = f"{_mark(item.coverage)} troque “{item.resume_term}” por “{item.name}”"
+        elif item.metadata_only:
+            action = f"{_mark(item.coverage)} está só nas palavras-chave do PDF; coloque no texto"
+        else:
+            action = f"{_mark(item.coverage)} só inclua se você tiver essa experiência"
+        rows.append([str(number), _cell(item.name), _pct(item.share), _pct(item.required_share), _cell(action)])
+    body = (
+        _table(["#", "Item", "Pedem", "Obrigatório", "Ação"], rows)
+        if rows
+        else "Nada a ajustar entre os itens mais pedidos."
+    )
+    return "## O que ajustar primeiro\n" + body
+
+
+def _differentials_section(report: Report, with_resume: bool) -> str:
+    chosen = differentials(report.items, report.senior_jobs)
+    lines = [f"{_count(report.senior_jobs, 'vaga sênior', 'vagas sênior')}."]
+    if not chosen:
+        lines.append("Nenhum diferencial claro nas vagas sênior.")
+        return "## Diferenciais das vagas sênior\n" + "\n\n".join(lines)
+    headers = ["Item", "Nas sênior", "No geral"] + (["No currículo"] if with_resume else [])
+    rows = []
+    for item in chosen:
+        row = [_cell(item.name), _pct(item.senior_share), _pct(item.share)]
+        if with_resume:
+            mark = _mark(item.coverage)
+            if item.coverage == ResumeCoverage.SYNONYM:
+                mark += f" “{_cell(item.resume_term)}”"
+            row.append(mark)
+        rows.append(row)
+    lines.append(_table(headers, rows))
+    return "## Diferenciais das vagas sênior\n" + "\n\n".join(lines)
+
+
+def _ranking_section(report: Report, category: Category, with_resume: bool) -> str:
+    title, label = _CATEGORY_TITLES[category]
+    top = _top(report.items, category)
+    if not top:
+        return f"## {title}\n" + "Nenhum item."
+    with_required = category != Category.RESPONSIBILITY
+    headers = [label, "Vagas", "% das vagas"] + (["% obrigatório"] if with_required else []) + ["% nas sênior"]
+    if with_resume:
+        headers.append("No currículo")
+    rows = []
+    for item in top:
+        name = _cell(item.name) + (" (detectada pela IA)" if item.origin in _AI_ORIGINS else "")
+        row = [name, str(item.jobs), _pct(item.share)]
+        if with_required:
+            row.append(_pct(item.required_share))
+        row.append(_pct(item.senior_share))
+        if with_resume:
+            row.append(_mark(item.coverage))
+        rows.append(row)
+    return f"## {title}\n" + _table(headers, rows)
+
+
+def _counted_list(entries: list[tuple[str, int]], quote: bool) -> str:
+    ordered = sorted(entries, key=lambda entry: (-entry[1], entry[0]))
+    parts = []
+    for index, (name, count) in enumerate(ordered):
+        shown = f'"{name}"' if quote else name
+        suffix = _count(count, "vaga", "vagas") if index == 0 else str(count)
+        parts.append(f"{shown} ({suffix})")
+    return " · ".join(parts)
+
+
+def render_markdown(report: Report) -> str:
+    if report.generated_at.tzinfo is None:
+        raise ValueError("generated_at must be timezone-aware")
+    local = report.generated_at.astimezone(REPORT_TIMEZONE)
+    with_resume = report.resume is not None or report.resume_check_failed
+    filters = report.filters.strip() or "nenhum"
+    sections = [
+        f"# Análise das vagas — {local:%d/%m/%Y %H:%M}\n"
+        f"**{_count(report.total_jobs, 'vaga analisada', 'vagas analisadas')}** · "
+        f"{_count(report.duplicate_jobs, 'repetida foi juntada', 'repetidas foram juntadas')} · filtros: {filters}\n"
+        f"{_count(report.skipped_jobs, 'vaga não pôde ser analisada', 'vagas não puderam ser analisadas')}. "
+        f"{_count(report.pending_jobs, 'ficou', 'ficaram')} para a próxima análise."
+    ]
+    if report.total_jobs < MIN_JOBS_FOR_TRUST:
+        sections.append(
+            f"⚠️ Amostra pequena: com menos de {MIN_JOBS_FOR_TRUST} vagas o ranking ainda muda muito."
+        )
+    if with_resume:
+        failed = report.resume_check_failed
+        rows = [["Tecnologias", f"**{_pct(coverage_score(report.items, Category.TECHNOLOGY))}**"]]
+        for label, category in (("Habilidades", Category.SKILL), ("Responsabilidades", Category.RESPONSIBILITY)):
+            rows.append([label, _NOT_COMPARED if failed else f"**{_pct(coverage_score(report.items, category))}**"])
+        parts = ["## Cobertura do seu currículo\n" + _table(["Categoria", "Cobertura"], rows)]
+        if failed:
+            parts.append(
+                "Não deu para comparar habilidades e responsabilidades com o currículo agora. "
+                "Rode de novo mais tarde."
+            )
+        parts.append("Para ficar entre os 10% mais aderentes, mire em 90% ou mais nas tecnologias e habilidades.")
+        sections.append("\n\n".join(parts))
+    sections.append(_knockout_section(report))
+    if with_resume:
+        sections.append(_adjust_section(report))
+    sections.append(_differentials_section(report, with_resume))
+    if with_resume:
+        terms = profile_terms(report.items)
+        body = (
+            "Cadastre estas competências no perfil, com a mesma grafia. "
+            "A Gupy compara o perfil preenchido com a vaga, não só o PDF.\n\n"
+            + " · ".join(f"`{term}`" for term in terms)
+            if terms
+            else "Nenhuma competência do seu currículo aparece entre as mais pedidas."
+        )
+        sections.append("## Para o perfil da Gupy e do LinkedIn\n" + body)
+    for category in Category:
+        sections.append(_ranking_section(report, category, with_resume))
+    if report.learned_now:
+        learned = (
+            "Já entraram no ranking e passam a ser procuradas sozinhas nas próximas análises.\n\n"
+            + _counted_list(report.learned_now, quote=False)
+        )
+    else:
+        learned = "Nenhuma tecnologia nova nesta análise."
+    sections.append("## Tecnologias aprendidas nesta análise\n" + learned)
+    discarded = (
+        _counted_list(report.discarded_phrases, quote=True)
+        if report.discarded_phrases
+        else "Nenhuma expressão descartada."
+    )
+    sections.append("## Expressões descartadas\n" + discarded)
+    return "\n\n".join(sections) + "\n"
+
+
+_CSV_HEADER = [
+    "categoria", "item", "origem", "vagas", "percentual", "percentual_obrigatorio", "peso",
+    "percentual_senior", "no_curriculo", "palavra_no_curriculo",
+]
+
+
+def _csv_pct(fraction: float) -> str:
+    return f"{fraction * 100:.1f}"
+
+
+def render_csv(report: Report) -> str:
+    order = list(Category)
+    ordered = sorted(report.items, key=lambda item: (order.index(item.category), -item.weight, item.name))
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(_CSV_HEADER)
+    for item in ordered:
+        writer.writerow([
+            item.category.api_value,
+            item.name,
+            item.origin.api_value,
+            item.jobs,
+            _csv_pct(item.share),
+            _csv_pct(item.required_share),
+            _csv_pct(item.weight),
+            _csv_pct(item.senior_share),
+            item.coverage.api_value if item.coverage is not None else "",
+            item.resume_term,
+        ])
+    return buffer.getvalue()
