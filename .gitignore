@@ -223,3 +223,6 @@ temp/
 # Local databases (state now lives in PocketBase)
 vagas_gupy.db*
 pocketbase/pb_data/
+
+# Job analysis reports and caches (analyze_descriptions.py)
+reports/

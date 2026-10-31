@@ -10,6 +10,8 @@ O GitHub Actions fica como reserva manual (`workflow_dispatch`).
 | `deploy/vagas-bot.timer` | `/etc/systemd/system/` | Dispara a rodada nos horários de Brasília |
 | `deploy/vagas-bot.service` | `/etc/systemd/system/` | Uma rodada: `run_all.py` |
 | `deploy/vagas-bot-failed.service` | `/etc/systemd/system/` | Avisa no Telegram quando a rodada falha |
+| `deploy/vagas-analysis.timer` | `/etc/systemd/system/` | Dispara a análise das vagas toda segunda às 8h |
+| `deploy/vagas-analysis.service` | `/etc/systemd/system/` | Uma análise: `analyze_descriptions.py` (relatório em `/opt/vagas-bot/app/reports/`) |
 | `/etc/vagas-bot/bot.env` | VPS | Segredos e configuração (modelo: `deploy/bot.env.example`) |
 | `/opt/vagas-bot/app` | VPS | Clone deste repositório |
 | `/opt/vagas-bot/venv` | VPS | Python 3.12 com as dependências |
@@ -86,6 +88,7 @@ systemctl list-timers vagas-bot.timer
 
 - Segunda a sexta: 8h, 10h, 12h … 20h
 - Sábado e domingo: 10h, 14h, 18h
+- Análise das vagas: segunda às 8h
 
 `Persistent=true` roda a rodada perdida quando a VPS volta. VPS desligada = nada roda e nada avisa.
 
@@ -135,10 +138,73 @@ não duplica.
 Prova contra os sites reais: rodar `main.py --fetch-descriptions` do mesmo jeito e conferir no painel que uma vaga
 de cada fonte ficou `saved`.
 
+## Análise semanal das vagas
+
+Toda segunda às 8h o `vagas-analysis.timer` roda a análise das descrições salvas e grava o relatório em
+`/opt/vagas-bot/app/reports/`. Gasta crédito da API do Claude.
+
+### 1. Configurar (uma vez)
+
+Chave da API do Claude: abra o arquivo e preencha `ANTHROPIC_API_KEY=`.
+
+```bash
+! nano /etc/vagas-bot/bot.env
+```
+
+Conferir sem mostrar o valor: `grep -c '^ANTHROPIC_API_KEY=.' /etc/vagas-bot/bot.env` → `1` e
+`stat -c '%a %U' /etc/vagas-bot/bot.env` → `600 deploy`.
+
+Currículo: o usuário `deploy` precisa ler o `.tex`. Copie para `/etc/vagas-bot/` e preencha
+`RESUME_PATH=/etc/vagas-bot/curriculo.tex` no `bot.env`:
+
+```bash
+! sudo install -m 600 -o deploy -g deploy /home/leandro/projects/cv/curriculo-leandro-rocha-flutter.tex /etc/vagas-bot/curriculo.tex
+```
+
+Repita a cópia quando o currículo mudar. Sem `RESUME_PATH`, a análise sai sem comparação com o currículo e não falha.
+
+### 2. Instalar
+
+```bash
+! sudo cp /opt/vagas-bot/app/deploy/vagas-analysis.{service,timer} /etc/systemd/system/
+! sudo systemctl daemon-reload
+```
+
+### 3. Rodar à mão (antes do `enable`)
+
+```bash
+sudo systemctl start vagas-analysis.service
+journalctl -u vagas-analysis.service -f
+```
+
+### 4. Ver o resultado
+
+```bash
+ls -t /opt/vagas-bot/app/reports/
+journalctl -u vagas-analysis.service -n 50
+```
+
+Os arquivos são `analise-vagas-AAAA-MM-DD-HHMM.md` e `.csv` (horário de Brasília). Se a análise falhar, o aviso
+"A análise semanal das vagas falhou: …" chega no Telegram na próxima rodada do bot.
+
+### 5. Ligar o agendamento
+
+```bash
+sudo systemctl enable --now vagas-analysis.timer
+systemctl list-timers vagas-analysis.timer
+```
+
+### 6. Cache
+
+- `reports/cache/extractions.json`: evita pagar de novo pela mesma vaga.
+- `reports/cache/learned_terms.json`: guarda as tecnologias aprendidas (apagar faz a análise esquecer).
+
 ## Desligar
 
 ```bash
 sudo systemctl disable --now vagas-bot.timer
+# só a análise:
+sudo systemctl disable --now vagas-analysis.timer
 ```
 
 ## Voltar para o GitHub (rollback)

@@ -1,0 +1,14 @@
+# Schedule of the weekly job analysis. The times are already Brasília time (the zone is in OnCalendar): do not convert to UTC.
+[Unit]
+Description=Weekly job analysis schedule (Brasília time)
+
+[Timer]
+# Every Monday at 8h
+OnCalendar=Mon *-*-* 08:00:00 America/Sao_Paulo
+AccuracySec=1s
+RandomizedDelaySec=60
+# Runs the analysis missed while the VPS was off
+Persistent=true
+
+[Install]
+WantedBy=timers.target

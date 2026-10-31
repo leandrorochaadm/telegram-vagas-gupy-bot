@@ -1,0 +1,19 @@
+# Weekly analysis of the saved job descriptions (analyze_descriptions.py).
+# Failures are alerted by the script itself, so there is no OnFailure=.
+[Unit]
+Description=Weekly analysis of the job descriptions
+Wants=network-online.target
+After=network-online.target pocketbase-job-search.service
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/vagas-bot/app
+EnvironmentFile=/etc/vagas-bot/bot.env
+Environment=PATH=/home/deploy/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/deploy/.local/bin/uv run --script analyze_descriptions.py
+TimeoutStartSec=30min
+MemoryMax=1G
+NoNewPrivileges=yes
+PrivateTmp=yes
