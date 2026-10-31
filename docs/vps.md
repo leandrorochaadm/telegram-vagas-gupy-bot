@@ -154,11 +154,13 @@ Chave da API do Claude: abra o arquivo e preencha `ANTHROPIC_API_KEY=`.
 Conferir sem mostrar o valor: `grep -c '^ANTHROPIC_API_KEY=.' /etc/vagas-bot/bot.env` → `1` e
 `stat -c '%a %U' /etc/vagas-bot/bot.env` → `600 deploy`.
 
-Currículo: o usuário `deploy` precisa ler o `.tex`. Copie para `/etc/vagas-bot/` e preencha
-`RESUME_PATH=/etc/vagas-bot/curriculo.tex` no `bot.env`:
+Currículo: o usuário `deploy` precisa ler o `.tex`, que fica na máquina de desenvolvimento (não na VPS). Envie
+para `/etc/vagas-bot/` e preencha `RESUME_PATH=/etc/vagas-bot/curriculo.tex` no `bot.env`. Na máquina de
+desenvolvimento:
 
 ```bash
-! sudo install -m 600 -o deploy -g deploy /home/leandro/projects/cv/curriculo-leandro-rocha-flutter.tex /etc/vagas-bot/curriculo.tex
+scp /home/leandro/projects/cv/curriculo-leandro-rocha-flutter.tex hostinger:/tmp/curriculo.tex
+ssh hostinger 'sudo install -m 600 -o deploy -g deploy /tmp/curriculo.tex /etc/vagas-bot/curriculo.tex && rm /tmp/curriculo.tex'
 ```
 
 Repita a cópia quando o currículo mudar. Sem `RESUME_PATH`, a análise sai sem comparação com o currículo e não falha.
