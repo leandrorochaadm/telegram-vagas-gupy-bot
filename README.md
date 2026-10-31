@@ -19,6 +19,7 @@ Bot que monitora vagas de emprego em múltiplas plataformas e envia alertas form
 - [Banco de dados (PocketBase)](#-banco-de-dados-pocketbase)
 - [Guia de configuração detalhado](#-guia-de-configuração-detalhado)
 - [Configurando o GitHub Actions](#-configurando-o-github-actions)
+- [Análise das vagas](#-análise-das-vagas)
 - [Exemplo de alerta](#-exemplo-de-alerta)
 - [Avisos de erro](#avisos-de-erro)
 - [Créditos](#-créditos)
@@ -462,6 +463,33 @@ python main.py --backfill-descriptions  # cria pendências para vagas enviadas a
 ```
 
 As descrições das vagas antigas chegam nas rodadas seguintes.
+
+---
+
+## 📊 Análise das vagas
+
+O comando lê as descrições salvas no banco, ranqueia tecnologias, habilidades e responsabilidades, compara com o currículo e grava `reports/analise-vagas-AAAA-MM-DD-HHMM.md` e `.csv`. A pasta `reports/` não é versionada.
+
+```bash
+uv run analyze_descriptions.py --resume <caminho do .tex>
+```
+
+Rode da raiz do repositório. Opções:
+
+- `--since-days N`: só descrições salvas nos últimos N dias.
+- `--seniority TEXTO`: filtra por senioridade (ex.: `pleno`); procura na senioridade e no título.
+- `--max-new N`: teto de vagas novas enviadas à IA por análise (padrão 400); o resto fica para a próxima.
+- `--env-file PATH`: arquivo de configuração (padrão `/etc/vagas-bot/bot.env`; sem ele, o `.env` ao lado do script).
+
+Sem `--resume`, usa o `RESUME_PATH` desse arquivo; se estiver vazio, o relatório sai sem comparação com o currículo.
+
+A chave `ANTHROPIC_API_KEY` fica no arquivo de configuração. Sem ela, o comando para antes de ler o banco.
+
+**Custo:** a API do Claude é paga por uso. O Haiku roda uma vez por vaga nova, e o Sonnet em poucas chamadas por análise (agrupar rótulos, comparar o currículo, classificar expressões). O cache em `reports/cache/` evita pagar de novo pela mesma vaga.
+
+O relatório só sugere: nunca altera o `.tex`. Inclua um item ausente só se você tiver essa experiência.
+
+Na VPS a análise roda sozinha toda segunda às 8h (Brasília); a instalação está em [`docs/vps.md`](docs/vps.md). Se falhar, o aviso chega no Telegram na rodada seguinte.
 
 ---
 
