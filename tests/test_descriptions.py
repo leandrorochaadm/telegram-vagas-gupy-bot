@@ -2,6 +2,7 @@
 
 Run: python -m unittest discover -s tests -v
 """
+import itertools
 import os
 import sys
 import unittest
@@ -326,12 +327,15 @@ class FetchDescriptionsTest(DescriptionTestCase):
         links = [f"https://acme.gupy.io/job/{i}" for i in range(5)]
         for link in links:
             self.pending(link)
-        relogio = mock.Mock(side_effect=[0, 10, 20, main.ORCAMENTO_DESCRICOES_S, main.ORCAMENTO_DESCRICOES_S])
+        old = "https://acme.gupy.io/job/old"
+        self.pending(old, title="Velha", attempts=1, first_try_at=NOW - timedelta(days=5))
+        relogio = mock.Mock(side_effect=itertools.chain([0, 10, 20], itertools.repeat(main.ORCAMENTO_DESCRICOES_S)))
         fetch = self.fetch({link: JobDetails("x") for link in links}, relogio=relogio)
         self.assertEqual(fetch.call_count, 2)
         left = self.db.pending_descriptions()
         self.assertEqual(len(left), 3)
         self.assertTrue(all(r.attempts == 0 for r in left))
+        self.assertEqual(self.db.descriptions[old].status, DescriptionStatus.GAVE_UP)
 
     def test_no_pending_makes_no_request(self):
         fetch = self.fetch({})

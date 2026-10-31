@@ -435,8 +435,9 @@ def buscar_descricoes(db: Store, agora: datetime | None = None, pausa=time.sleep
                 continue
             if pedidos >= MAX_DESCRICOES_POR_RODADA:
                 continue
+            # Out of time: skip the requests but keep walking, so old failures still give up
             if relogio() - inicio >= ORCAMENTO_DESCRICOES_S:
-                break
+                continue
             if e_linkedin and pedidos_linkedin > 0:
                 pausa(PAUSA_ENTRE_DESCRICOES_LINKEDIN)
             pedidos += 1
