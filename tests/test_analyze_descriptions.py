@@ -632,7 +632,7 @@ class MainTest(unittest.TestCase):
         self.assertIn(ad.MSG_ALL_EXTRACTIONS_FAILED, err)
         alerts = self.alerts()
         self.assertEqual(len(alerts), 1)
-        self.assertIn("a API do Claude recusou todas as chamadas", alerts[0].text)
+        self.assertIn("todas as chamadas à API do Claude falharam", alerts[0].text)
 
     def test_failure_records_alert(self) -> None:
         missing = self.tmp / "nope.tex"
