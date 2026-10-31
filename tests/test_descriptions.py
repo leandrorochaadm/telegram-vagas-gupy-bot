@@ -293,6 +293,16 @@ class FetchDescriptionsTest(DescriptionTestCase):
         self.assertEqual(len(self.db.pending_descriptions()), 5)
         self.assertTrue(all(r.attempts == 0 for r in self.db.pending_descriptions()))
 
+    def test_failing_jobs_do_not_starve_fresh_ones(self):
+        failing = [f"https://acme.com/vaga/{i}" for i in range(main.MAX_DESCRICOES_POR_RODADA)]
+        for link in failing:
+            self.pending(link, source=Source.WEB, attempts=5)
+        fresh = "https://acme.gupy.io/job/new"
+        self.pending(fresh)
+        error = DetailsError("falhou", DetailsFailure.NETWORK)
+        self.fetch({fresh: JobDetails("x"), **{link: error for link in failing}})
+        self.assertEqual(self.db.descriptions[fresh].status, DescriptionStatus.SAVED)
+
     def test_give_up_does_not_count_in_cap(self):
         links = [f"https://acme.gupy.io/job/{i}" for i in range(main.MAX_DESCRICOES_POR_RODADA)]
         for link in links:

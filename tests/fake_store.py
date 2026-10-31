@@ -251,7 +251,7 @@ class FakeStore:
         return [JobDescription(
             id=row.id, link=row.link, source=row.source, title=row.title, company=row.company,
             published=row.published, attempts=row.attempts, first_try_at=row.first_try_at,
-            created=row.created) for row in tried + fresh]
+            created=row.created) for row in fresh + tried]
 
     def saved_descriptions(self, since: datetime | None = None) -> list[SavedDescription]:
         self._check()

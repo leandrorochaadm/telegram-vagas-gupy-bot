@@ -465,7 +465,8 @@ class Store:
                 fresh.append((created or oldest, job))
         tried.sort(key=lambda item: item[0])
         fresh.sort(key=lambda item: item[0], reverse=True)
-        return [job for _, job in tried] + [job for _, job in fresh]
+        # Fresh jobs first: pages that keep failing must not take every slot of the round
+        return [job for _, job in fresh] + [job for _, job in tried]
 
     def saved_descriptions(self, since: datetime | None = None) -> list[SavedDescription]:
         filter_ = f"{_Field.STATUS} = {_quote(DescriptionStatus.SAVED.api_value)}"

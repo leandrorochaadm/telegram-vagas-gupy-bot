@@ -299,7 +299,7 @@ class StoreContractCases:
         self.db.finish_description(self.description_id("E"), DescriptionStatus.CLOSED, t1)
         self.db.finish_description(self.description_id("F"), DescriptionStatus.GAVE_UP, t1)
         self.assertEqual([job.link for job in self.db.pending_descriptions()],
-                         ["D", "B", "G", "A"])
+                         ["G", "A", "D", "B"])
 
     def test_save_description_sets_saved_and_finished_at(self) -> None:
         self.add_description("A")
