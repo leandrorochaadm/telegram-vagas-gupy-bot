@@ -88,6 +88,7 @@ MSG_STORE = "Não foi possível ler o banco de vagas: {error}"
 MSG_RESUME = "Não foi possível ler o currículo em {path}."
 MSG_ENV_FILE = "Não foi possível ler o arquivo de configuração {path}."
 MSG_UNEXPECTED = "Erro inesperado ({kind}). " + LOG_HINT
+MSG_ALL_EXTRACTIONS_FAILED = "Nenhuma vaga pôde ser analisada: a API do Claude recusou todas as chamadas. " + LOG_HINT
 MSG_ALERT_TEXT = "A análise semanal das vagas falhou: {reason}."
 MSG_ALERT_NOT_SAVED = "Não foi possível guardar o aviso da falha: {error}"
 MSG_REPORT_SAVED = "Relatório gravado em {path}"
@@ -164,11 +165,21 @@ class ExtractionBatch:
     skipped_jobs: int
     pending_jobs: int
     new_calls: int
+    last_error: ExtractionError | None = None
+
+
+class AllExtractionsFailed(Exception):
+    """Every extraction attempted in this run failed, so no job could be analyzed."""
+
+    def __init__(self, cause: ExtractionError) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
 
 
 def extract_all(kept: list[SavedDescription], extractor, cache: ExtractionCache, max_new: int) -> ExtractionBatch:
     extracted: dict[str, Extraction] = {}
     skipped = pending = new_calls = new_puts = 0
+    last_error: ExtractionError | None = None
     try:
         for row in kept:
             key = cache.key(row.id, row.description)
@@ -186,6 +197,7 @@ def extract_all(kept: list[SavedDescription], extractor, cache: ExtractionCache,
                 if error.kind not in _SOFT_FAILURES:
                     raise
                 skipped += 1
+                last_error = error
                 continue
             cache.put(key, extraction)
             extracted[row.id] = extraction
@@ -195,7 +207,9 @@ def extract_all(kept: list[SavedDescription], extractor, cache: ExtractionCache,
     finally:
         if new_puts > 0:
             cache.save()
-    return ExtractionBatch(extracted=extracted, skipped_jobs=skipped, pending_jobs=pending, new_calls=new_calls)
+    return ExtractionBatch(
+        extracted=extracted, skipped_jobs=skipped, pending_jobs=pending, new_calls=new_calls, last_error=last_error
+    )
 
 
 # --- grouping and items per job --------------------------------------------------------------------------------
@@ -455,6 +469,8 @@ def run(
 
     batch = extract_all(selection.kept, extractor, cache, max_new)
     if not batch.extracted:
+        if batch.last_error is not None:
+            raise AllExtractionsFailed(batch.last_error)
         print(MSG_NOTHING_ANALYZED)
         return None
 
@@ -614,6 +630,9 @@ def main(argv: Sequence[str] = ()) -> int:
     except StoreError as error:
         print(MSG_STORE.format(error=error), file=sys.stderr)
         return 1
+    except AllExtractionsFailed as error:
+        print(error.cause, file=sys.stderr)
+        return _fail(MSG_ALL_EXTRACTIONS_FAILED, db)
     except ExtractionError as error:
         if error.kind is ExtractionFailure.MISSING_KEY:
             return _fail(missing_key, db)

@@ -305,10 +305,17 @@ class CacheAndLimitsTest(AnalyzeTestCase):
         self.assertIn("1 vaga não pôde ser analisada.",
                       (self.out_dir / "analise-vagas-2026-11-02-0800.md").read_text(encoding="utf-8"))
 
-    def test_all_extractions_failed_writes_nothing(self):
+    def test_all_extractions_failed_raises(self):
         self.add_saved("Ruim", "Dart.")
         self.extractor.fail_titles = {"Ruim"}
-        self.assertIsNone(self.go())
+        with self.assertRaises(ad.AllExtractionsFailed) as raised:
+            self.go()
+        self.assertIs(raised.exception.cause.kind, ExtractionFailure.API)
+        self.assertFalse(self.out_dir.exists())
+
+    def test_nothing_extracted_without_errors_writes_nothing(self):
+        self.add_saved("Boa", "Flutter.")
+        self.assertIsNone(self.go(max_new=0))
         self.assertIn(ad.MSG_NOTHING_ANALYZED, self.output)
         self.assertFalse(self.out_dir.exists())
 
@@ -616,6 +623,16 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn(ad.MSG_RESUME.format(path=bad), err)
         self.assertEqual(len(self.alerts()), 1)
+
+    def test_all_extractions_failed_exits_1_with_alert(self) -> None:
+        self.run_result = ad.AllExtractionsFailed(api_error())
+        code, _, err = self.call_main()
+        self.assertEqual(code, 1)
+        self.assertIn("boom", err)
+        self.assertIn(ad.MSG_ALL_EXTRACTIONS_FAILED, err)
+        alerts = self.alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("a API do Claude recusou todas as chamadas", alerts[0].text)
 
     def test_failure_records_alert(self) -> None:
         missing = self.tmp / "nope.tex"
