@@ -9,14 +9,21 @@ Lê as descrições `saved` do banco, extrai habilidades e requisitos de cada va
 compara com o currículo e grava os arquivos em `reports/` com a data e hora de Brasília no nome.
 Este módulo tem o `run`; a linha de comando (argumentos, chave da API, currículo) fica no `main`.
 """
+import argparse
 import dataclasses
+import os
 import re
+import sys
+import traceback
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import store
 from description_extractor import (
+    ClaudeExtractor,
     Coverage,
     Extraction,
     ExtractionCache,
@@ -27,7 +34,9 @@ from description_extractor import (
     ResumeCoverage,
     ResumeProfile,
     Skill,
+    make_client,
 )
+from env_file import load_env_file
 from job_analysis import (
     REPORT_TIMEZONE,
     TOP_N,
@@ -50,7 +59,7 @@ from job_analysis import (
     tex_to_text,
     unknown_ai_technologies,
 )
-from store import SavedDescription
+from store import SavedDescription, Source, StoreError
 from tech_terms import (
     LEARNED_TERMS_PATH,
     TECH_TERMS,
@@ -72,6 +81,17 @@ REPORT_FILE_PREFIX = "analise-vagas-"
 REPORT_STAMP_FORMAT = "%Y-%m-%d-%H%M"
 MSG_NO_DESCRIPTIONS = "Nenhuma descrição salva para analisar com esses filtros."
 MSG_NOTHING_ANALYZED = "Nenhuma vaga pôde ser analisada agora. Rode de novo mais tarde."
+LOCAL_ENV_FILE = Path(__file__).resolve().parent / ".env"
+LOG_HINT = "Detalhes: journalctl -u vagas-analysis.service -n 50"
+MSG_MISSING_KEY = "Falta a chave da API do Claude (ANTHROPIC_API_KEY) no arquivo de configuração {path}."
+MSG_STORE = "Não foi possível ler o banco de vagas: {error}"
+MSG_RESUME = "Não foi possível ler o currículo em {path}."
+MSG_ENV_FILE = "Não foi possível ler o arquivo de configuração {path}."
+MSG_UNEXPECTED = "Erro inesperado ({kind}). " + LOG_HINT
+MSG_ALERT_TEXT = "A análise semanal das vagas falhou: {reason}."
+MSG_ALERT_NOT_SAVED = "Não foi possível guardar o aviso da falha: {error}"
+MSG_REPORT_SAVED = "Relatório gravado em {path}"
+MSG_CSV_SAVED = "Planilha gravada em {path}"
 
 _REPORT_DATE_FORMAT = "%d/%m/%Y"
 _SOFT_FAILURES = (ExtractionFailure.API, ExtractionFailure.INVALID_RESPONSE)
@@ -484,3 +504,132 @@ def run(
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         handle.write(render_csv(report))
     return report
+
+
+# --- command line ----------------------------------------------------------------------------------------------
+
+
+def _positive_int(raw: str) -> int:
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError("precisa ser 1 ou mais")
+    return value
+
+
+def _non_negative_int(raw: str) -> int:
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError("precisa ser 0 ou mais")
+    return value
+
+
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Analisa as descrições de vagas salvas e grava um relatório.")
+    parser.add_argument("--resume", default=None, help="caminho do currículo em .tex")
+    parser.add_argument("--since-days", type=_positive_int, default=None, help="só vagas salvas nos últimos N dias")
+    parser.add_argument("--seniority", default=None, help="só vagas dessa senioridade (texto)")
+    parser.add_argument(
+        "--max-new", type=_non_negative_int, default=MAX_NEW_EXTRACTIONS,
+        help=f"máximo de vagas novas para a IA ler (padrão {MAX_NEW_EXTRACTIONS})",
+    )
+    parser.add_argument("--env-file", default=None, help="arquivo de configuração (KEY=valor)")
+    return parser.parse_args(argv)
+
+
+def resolve_env_file(explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit)
+    default = Path(DEFAULT_ENV_FILE)
+    return default if default.exists() else LOCAL_ENV_FILE
+
+
+def resolve_resume_path(explicit: str | None) -> Path | None:
+    if explicit is not None and explicit.strip():
+        return Path(explicit)
+    from_env = os.environ.get(ENV_RESUME_PATH, "").strip()
+    return Path(from_env) if from_env else None
+
+
+def record_failure_alert(db: store.Store | None, reason: str) -> None:
+    text = MSG_ALERT_TEXT.format(reason=reason.rstrip("."))
+    try:
+        if db is None:
+            db = store.from_env()
+            db.connect()
+    except StoreError as error:
+        print(MSG_STORE.format(error=error), file=sys.stderr)
+        return
+    try:
+        db.add_alerts([(Source.ANALYSIS.api_value, text)])
+    except StoreError as error:
+        print(MSG_ALERT_NOT_SAVED.format(error=error), file=sys.stderr)
+
+
+def _fail(message: str, db: store.Store | None) -> int:
+    print(message, file=sys.stderr)
+    record_failure_alert(db, message)
+    return 1
+
+
+def main(argv: Sequence[str] = ()) -> int:
+    args = parse_args(argv)
+    env_path = resolve_env_file(args.env_file)
+    try:
+        load_env_file(str(env_path))
+    except OSError:
+        return _fail(MSG_ENV_FILE.format(path=env_path), None)
+
+    resume_path = resolve_resume_path(args.resume)
+    raw: str | None = None
+    if resume_path is not None:
+        try:
+            raw = resume_path.read_text(encoding="utf-8")
+            tex_to_text(raw)
+        except (OSError, UnicodeDecodeError, ValueError):
+            return _fail(MSG_RESUME.format(path=resume_path), None)
+
+    missing_key = MSG_MISSING_KEY.format(path=env_path)
+    try:
+        client = make_client()
+    except ExtractionError as error:
+        if error.kind is ExtractionFailure.MISSING_KEY:
+            return _fail(missing_key, None)
+        raise
+
+    try:
+        db = store.from_env()
+        db.connect()
+    except StoreError as error:
+        print(MSG_STORE.format(error=error), file=sys.stderr)
+        return 1
+
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=args.since_days) if args.since_days is not None else None
+    try:
+        report = run(
+            db, ClaudeExtractor(client), ExtractionCache(CACHE_PATH),
+            resume_text=raw, since=since, seniority=args.seniority, max_new=args.max_new, now=now,
+            out_dir=REPORTS_DIR, learned_path=LEARNED_TERMS_PATH,
+        )
+    except StoreError as error:
+        print(MSG_STORE.format(error=error), file=sys.stderr)
+        return 1
+    except ExtractionError as error:
+        if error.kind is ExtractionFailure.MISSING_KEY:
+            return _fail(missing_key, db)
+        traceback.print_exc()
+        return _fail(MSG_UNEXPECTED.format(kind=type(error).__name__), db)
+    except Exception as error:
+        traceback.print_exc()
+        return _fail(MSG_UNEXPECTED.format(kind=type(error).__name__), db)
+
+    if report is None:
+        return 0
+    markdown_path, csv_path = report_paths(REPORTS_DIR, now)
+    print(MSG_REPORT_SAVED.format(path=markdown_path))
+    print(MSG_CSV_SAVED.format(path=csv_path))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import analyze_descriptions as ad  # noqa: E402
+import description_extractor  # noqa: E402
 from description_extractor import (  # noqa: E402
     Coverage, Education, EnglishLevel, Extraction, ExtractionCache, ExtractionError, ExtractionFailure, Knockout,
     PhraseKind, Requirement, ResumeCoverage, ResumeProfile, Skill, WorkModel,
@@ -430,3 +431,224 @@ class LearningAndPhrasesTest(AnalyzeTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def write_env(path: Path, **values: str) -> None:
+    path.write_text("".join(f"{key}={value}\n" for key, value in values.items()), encoding="utf-8")
+
+
+class MainTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.tmp = tmp
+        self.default_env = tmp / "etc-bot.env"  # not created: the system file is absent by default
+        self.local_env = tmp / "local.env"
+        for name, value in (
+            ("DEFAULT_ENV_FILE", str(self.default_env)),
+            ("LOCAL_ENV_FILE", self.local_env),
+            ("REPORTS_DIR", tmp / "reports"),
+            ("CACHE_PATH", tmp / "cache" / "extractions.json"),
+            ("LEARNED_TERMS_PATH", tmp / "cache" / "learned.json"),
+        ):
+            patcher = mock.patch.object(ad, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        env = mock.patch.dict(os.environ, {}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        self.db = FakeStore()
+        self.from_env_calls = 0
+        patcher = mock.patch.object(ad.store, "from_env", side_effect=self._from_env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.run_calls: list[dict] = []
+        self.run_result = None
+        patcher = mock.patch.object(ad, "run", side_effect=self._run)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.make_client = mock.patch.object(ad, "make_client", return_value=object()).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _from_env(self) -> FakeStore:
+        self.from_env_calls += 1
+        return self.db
+
+    def _run(self, *args, **kwargs):
+        if isinstance(self.run_result, Exception):
+            raise self.run_result
+        self.run_calls.append(kwargs)
+        return self.run_result
+
+    def call_main(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ad.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def alerts(self):
+        return self.db.pending_alerts()
+
+    def test_main_prints_report_paths(self) -> None:
+        self.run_result = object()
+        with mock.patch.object(ad, "datetime") as fake_dt:
+            fake_dt.now.return_value = NOW
+            code, out, _ = self.call_main()
+        markdown, csv = ad.report_paths(ad.REPORTS_DIR, NOW)
+        self.assertEqual(code, 0)
+        self.assertIn(ad.MSG_REPORT_SAVED.format(path=markdown), out)
+        self.assertIn(ad.MSG_CSV_SAVED.format(path=csv), out)
+
+    def test_since_days_becomes_utc_since(self) -> None:
+        before = datetime.now(timezone.utc)
+        self.call_main("--since-days", "30")
+        kwargs = self.run_calls[0]
+        self.assertIsNotNone(kwargs["since"].tzinfo)
+        self.assertEqual(kwargs["since"], kwargs["now"] - timedelta(days=30))
+        self.assertGreaterEqual(kwargs["now"], before)
+
+    def test_since_days_must_be_positive(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            ad.main(["--since-days", "0"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(self.run_calls, [])
+
+    def test_max_new_default_and_override(self) -> None:
+        self.call_main()
+        self.call_main("--max-new", "5")
+        self.assertEqual([call["max_new"] for call in self.run_calls], [ad.MAX_NEW_EXTRACTIONS, 5])
+
+    def test_env_file_resolution(self) -> None:
+        self.assertEqual(ad.resolve_env_file(None), self.local_env)
+        self.default_env.write_text("", encoding="utf-8")
+        self.assertEqual(ad.resolve_env_file(None), self.default_env)
+        explicit = self.tmp / "missing.env"
+        self.assertEqual(ad.resolve_env_file(str(explicit)), explicit)
+
+    def test_env_file_does_not_override_environment(self) -> None:
+        write_env(self.local_env, RESUME_PATH="from-file", OTHER="x")
+        os.environ["RESUME_PATH"] = ""
+        os.environ["OTHER"] = "from-env"
+        self.call_main()
+        self.assertEqual(os.environ["OTHER"], "from-env")
+
+    def test_unreadable_env_file_exits_1(self) -> None:
+        with mock.patch.object(ad, "load_env_file", side_effect=PermissionError):
+            code, _, err = self.call_main()
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_ENV_FILE.format(path=self.local_env), err)
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertEqual(self.run_calls, [])
+
+    def test_resume_path_from_env(self) -> None:
+        resume = self.tmp / "cv.tex"
+        resume.write_text(RESUME_TEX, encoding="utf-8")
+        write_env(self.local_env, RESUME_PATH=str(resume))
+        code, _, _ = self.call_main()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.run_calls[0]["resume_text"], RESUME_TEX)
+        write_env(self.local_env, RESUME_PATH="")
+        os.environ.pop("RESUME_PATH", None)
+        self.call_main()
+        self.assertIsNone(self.run_calls[1]["resume_text"])
+
+    def test_resume_flag_wins_over_env(self) -> None:
+        env_resume = self.tmp / "env.tex"
+        flag_resume = self.tmp / "flag.tex"
+        env_resume.write_text(RESUME_TEX + "% env\n", encoding="utf-8")
+        flag_resume.write_text(RESUME_TEX, encoding="utf-8")
+        os.environ["RESUME_PATH"] = str(env_resume)
+        self.call_main("--resume", str(flag_resume))
+        self.assertEqual(self.run_calls[0]["resume_text"], RESUME_TEX)
+
+    def test_missing_key_exits_1(self) -> None:
+        self.make_client.side_effect = ad.ExtractionError("x", ExtractionFailure.MISSING_KEY)
+        code, _, err = self.call_main()
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_MISSING_KEY.format(path=self.local_env), err)
+        self.assertEqual(self.run_calls, [])
+        self.assertEqual(len(self.alerts()), 1)
+
+    def test_missing_key_with_real_make_client(self) -> None:
+        self.make_client.side_effect = None
+        with mock.patch.object(ad, "make_client", description_extractor.make_client):
+            code, _, err = self.call_main()
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_MISSING_KEY.format(path=self.local_env), err)
+
+    def test_store_error_exits_1(self) -> None:
+        self.db = FakeStore(fail_with=StoreError())
+        code, _, err = self.call_main()
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_STORE.format(error=StoreError()), err)
+        self.assertEqual(self.from_env_calls, 1)
+        self.assertEqual(self.run_calls, [])
+
+    def test_missing_store_config_exits_1(self) -> None:
+        error = StoreError(ad.store.MSG_MISSING_CONFIG, ad.store.StoreFailure.MISSING_CONFIG)
+        with mock.patch.object(ad.store, "from_env", side_effect=error):
+            code, _, err = self.call_main()
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_STORE.format(error=ad.store.MSG_MISSING_CONFIG), err)
+        self.assertEqual(self.alerts(), [])
+
+    def test_store_error_during_run_exits_1(self) -> None:
+        self.run_result = StoreError()
+        code, _, err = self.call_main()
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_STORE.format(error=StoreError()), err)
+        self.assertEqual(self.alerts(), [])
+
+    def test_missing_resume_exits_1(self) -> None:
+        missing = self.tmp / "nope.tex"
+        self.make_client.side_effect = ad.ExtractionError("x", ExtractionFailure.MISSING_KEY)
+        code, _, err = self.call_main("--resume", str(missing))
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_RESUME.format(path=missing), err)
+        self.assertNotIn("ANTHROPIC_API_KEY", err)
+        self.make_client.assert_not_called()
+        self.assertEqual(self.run_calls, [])
+
+    def test_tex_without_document_exits_1(self) -> None:
+        bad = self.tmp / "bad.tex"
+        bad.write_text("no document here", encoding="utf-8")
+        code, _, err = self.call_main("--resume", str(bad))
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_RESUME.format(path=bad), err)
+        self.assertEqual(len(self.alerts()), 1)
+
+    def test_failure_records_alert(self) -> None:
+        missing = self.tmp / "nope.tex"
+        self.call_main("--resume", str(missing))
+        alerts = self.alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].label, Source.ANALYSIS.api_value)
+        self.assertEqual(alerts[0].text, f"A análise semanal das vagas falhou: Não foi possível ler o currículo em {missing}.")
+
+    def test_alert_write_failure_is_ignored(self) -> None:
+        missing = self.tmp / "nope.tex"
+        self.db = FakeStore(fail_with=StoreError())
+        code, _, err = self.call_main("--resume", str(missing))
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_RESUME.format(path=missing), err)
+        self.assertIn(ad.MSG_STORE.format(error=StoreError()), err)
+        # connect works but add_alerts fails
+        db = FakeStore()
+        db.add_alerts = mock.Mock(side_effect=StoreError())
+        err_io = io.StringIO()
+        with contextlib.redirect_stderr(err_io):
+            ad.record_failure_alert(db, "motivo.")
+        self.assertIn(ad.MSG_ALERT_NOT_SAVED.format(error=StoreError()), err_io.getvalue())
+
+    def test_unexpected_error_exits_1_and_records_alert(self) -> None:
+        self.run_result = RuntimeError("boom")
+        code, _, err = self.call_main()
+        self.assertEqual(code, 1)
+        self.assertIn(ad.MSG_UNEXPECTED.format(kind="RuntimeError"), err)
+        self.assertIn("Traceback", err)
+        self.assertEqual(len(self.alerts()), 1)
+
+    def test_no_descriptions_exits_0(self) -> None:
+        self.run_result = None
+        code, out, err = self.call_main()
+        self.assertEqual((code, out, err), (0, "", ""))
