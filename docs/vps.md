@@ -116,10 +116,12 @@ Chromium com o mesmo `PLAYWRIGHT_BROWSERS_PATH`.
 
 ### Quando entra migration nova
 
-1. Aplicar pelo `pb_provision.py`, primeiro com `--dry-run` e depois sem:
+1. Aplicar pelo `pb_deploy_migrations.py`, primeiro com `--dry-run` e depois sem. Ele faz backup do banco, troca as
+   migrations e reinicia o PocketBase (volta ao estado anterior se falhar). O `pb_provision.py` só copia as
+   migrations na primeira instalação; nas seguintes ele apenas avisa que há diferença.
 
 ```bash
-sudo python3 /home/deploy/.claude/skills/publish-pocketbase-pwa/scripts/pb_provision.py --app job-search --api-host job-search-api.tektonsoftware.com.br --pb-version 0.40.5 --migrations /opt/vagas-bot/app/pocketbase/pb_migrations --origin https://job-search.tektonsoftware.com.br --private-superuser --skip-deploy-key --dry-run
+sudo python3 /home/deploy/.claude/skills/publish-pocketbase-pwa/scripts/pb_deploy_migrations.py job-search --source /opt/vagas-bot/app/pocketbase/pb_migrations --dry-run
 ```
 
 2. Conferir no painel (túnel `ssh -N -L 8093:127.0.0.1:8093 hostinger`) que a coleção `job_descriptions` existe.
