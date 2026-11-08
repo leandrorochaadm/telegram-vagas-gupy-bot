@@ -5,7 +5,7 @@
 # ///
 """Analisa as descrições de vagas salvas e grava um relatório (.md) e uma planilha (.csv).
 
-Lê as descrições `saved` do banco de um grupo de vagas (`--track flutter` ou `--track mobile`), extrai
+Lê as descrições `saved` do banco de um grupo de vagas (`--track flutter`, `mobile` ou `backend`), extrai
 habilidades e requisitos de cada vaga com a IA (com cache local), compara com o currículo e grava os arquivos
 em `reports/` com o grupo e a data e hora de Brasília no nome.
 Este módulo tem o `run`; a linha de comando (argumentos, chave da API, currículo) fica no `main`.
@@ -79,13 +79,20 @@ DEFAULT_ENV_FILE = "/etc/vagas-bot/bot.env"
 ENV_RESUME_PATH = "RESUME_PATH"
 ALERT_LABEL = "Análise das vagas"  # texto de tela; o passo 09 grava o aviso com Source.ANALYSIS.api_value
 CACHE_SAVE_EVERY = 25
-# One report file per track, so the mobile jobs never mix with the Flutter ones
-REPORT_FILE_PREFIXES = {Track.FLUTTER: "analise-vagas-", Track.MOBILE: "analise-vagas-mobile-"}
+# One report file per track, so the tracks never mix
+REPORT_FILE_PREFIXES = {
+    Track.FLUTTER: "analise-vagas-",
+    Track.MOBILE: "analise-vagas-mobile-",
+    Track.BACKEND: "analise-vagas-backend-",
+}
 REPORT_STAMP_FORMAT = "%Y-%m-%d-%H%M"
 MSG_NO_DESCRIPTIONS = "Nenhuma descrição salva para analisar com esses filtros."
 MSG_NOTHING_ANALYZED = "Nenhuma vaga pôde ser analisada agora. Rode de novo mais tarde."
 LOCAL_ENV_FILE = Path(__file__).resolve().parent / ".env"
-LOG_HINT = "Detalhes: journalctl -u vagas-analysis.service -u vagas-analysis-mobile.service -n 50"
+LOG_HINT = (
+    "Detalhes: journalctl -u vagas-analysis.service -u vagas-analysis-mobile.service "
+    "-u vagas-analysis-backend.service -n 50"
+)
 MSG_MISSING_KEY = "Falta a chave da API do Claude (ANTHROPIC_API_KEY) no arquivo de configuração {path}."
 MSG_STORE = "Não foi possível ler o banco de vagas: {error}"
 MSG_RESUME = "Não foi possível ler o currículo em {path}."
@@ -568,7 +575,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--env-file", default=None, help="arquivo de configuração (KEY=valor)")
     parser.add_argument(
         "--track", type=_track, default=Track.FLUTTER,
-        help="grupo de vagas: flutter (padrão) ou mobile (título com mobile, android, ios... e sem flutter)",
+        help=(
+            "grupo de vagas: flutter (padrão), mobile (título com mobile, android, ios... e sem flutter) "
+            "ou backend (título com back-end e sem flutter nem mobile)"
+        ),
     )
     return parser.parse_args(argv)
 

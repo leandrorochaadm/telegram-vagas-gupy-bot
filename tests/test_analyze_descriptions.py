@@ -278,6 +278,19 @@ class TrackTest(AnalyzeTestCase):
         self.assertTrue((self.out_dir / "analise-vagas-mobile-2026-11-02-0800.csv").exists())
         self.assertFalse((self.out_dir / "analise-vagas-2026-11-02-0800.md").exists())
 
+    def test_backend_track_keeps_only_backend_titles_in_its_own_file(self):
+        self.add_both_tracks()
+        self.add_saved("Desenvolvedor Backend Java", "Java e Spring.")
+        self.add_saved("Back-end Kotlin", "Kotlin e Ktor.")
+        self.add_saved("Fullstack Flutter + Back-end", "Flutter e Node.")
+        report = self.go_track(Track.BACKEND)
+        self.assertEqual(report.total_jobs, 1)
+        md = self.out_dir / "analise-vagas-backend-2026-11-02-0800.md"
+        self.assertIn("# Análise das vagas de Back-end", md.read_text(encoding="utf-8"))
+        self.assertTrue((self.out_dir / "analise-vagas-backend-2026-11-02-0800.csv").exists())
+        self.assertEqual(self.go_track(Track.FLUTTER).total_jobs, 4)
+        self.assertEqual(self.go_track(Track.MOBILE).total_jobs, 3)
+
     def test_report_paths_per_track(self):
         md, csv_file = ad.report_paths(Path("out"), NOW, Track.MOBILE)
         self.assertEqual(md, Path("out/analise-vagas-mobile-2026-11-02-0800.md"))

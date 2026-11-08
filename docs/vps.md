@@ -14,6 +14,8 @@ O GitHub Actions fica como reserva manual (`workflow_dispatch`).
 | `deploy/vagas-analysis.service` | `/etc/systemd/system/` | Uma análise: `analyze_descriptions.py` (relatório em `/opt/vagas-bot/app/reports/`) |
 | `deploy/vagas-analysis-mobile.timer` | `/etc/systemd/system/` | Dispara a análise das vagas de mobile toda segunda às 8h30 |
 | `deploy/vagas-analysis-mobile.service` | `/etc/systemd/system/` | Uma análise de mobile: `analyze_descriptions.py --track mobile` (espera a de Flutter terminar) |
+| `deploy/vagas-analysis-backend.timer` | `/etc/systemd/system/` | Dispara a análise das vagas de back-end toda segunda às 9h |
+| `deploy/vagas-analysis-backend.service` | `/etc/systemd/system/` | Uma análise de back-end: `analyze_descriptions.py --track backend` (espera as de Flutter e mobile terminarem) |
 | `/etc/vagas-bot/bot.env` | VPS | Segredos e configuração (modelo: `deploy/bot.env.example`) |
 | `/opt/vagas-bot/app` | VPS | Clone deste repositório |
 | `/opt/vagas-bot/venv` | VPS | Python 3.12 com as dependências |
@@ -146,7 +148,9 @@ de cada fonte ficou `saved`.
 
 Toda segunda às 8h o `vagas-analysis.timer` roda a análise das descrições salvas e grava o relatório em
 `/opt/vagas-bot/app/reports/`. Às 8h30 o `vagas-analysis-mobile.timer` faz o mesmo só com as vagas de mobile
-(sem Flutter no título), em outro arquivo. Gasta crédito da API do Claude.
+(sem Flutter no título), em outro arquivo, e às 9h o `vagas-analysis-backend.timer` só com as de back-end (sem
+Flutter nem mobile no título). As vagas de back-end não vão ao Telegram: existem só para essa análise. Gasta crédito
+da API do Claude.
 
 ### 1. Configurar (uma vez)
 
@@ -172,8 +176,12 @@ Repita a cópia quando o currículo mudar. Sem `RESUME_PATH`, a análise sai sem
 
 ### 2. Instalar
 
+A busca de back-end grava na tabela `analysis_only_jobs` (migration `1793500000_analysis_only_jobs.js`). Aplique a
+migration (veja "Quando entra migration nova") **antes** de o bot rodar com o código novo: sem a tabela, a rodada
+falha ao conferir as vagas já vistas.
+
 ```bash
-! sudo cp /opt/vagas-bot/app/deploy/vagas-analysis{,-mobile}.{service,timer} /etc/systemd/system/
+! sudo cp /opt/vagas-bot/app/deploy/vagas-analysis{,-mobile,-backend}.{service,timer} /etc/systemd/system/
 ! sudo systemctl daemon-reload
 ```
 
@@ -184,6 +192,8 @@ sudo systemctl start vagas-analysis.service
 journalctl -u vagas-analysis.service -f
 sudo systemctl start vagas-analysis-mobile.service
 journalctl -u vagas-analysis-mobile.service -f
+sudo systemctl start vagas-analysis-backend.service
+journalctl -u vagas-analysis-backend.service -f
 ```
 
 ### 4. Ver o resultado
@@ -193,14 +203,15 @@ ls -t /opt/vagas-bot/app/reports/
 journalctl -u vagas-analysis.service -n 50
 ```
 
-Os arquivos são `analise-vagas-AAAA-MM-DD-HHMM.md` e `.csv` (Flutter) e `analise-vagas-mobile-AAAA-MM-DD-HHMM.md` e
-`.csv` (mobile), no horário de Brasília. Se a análise falhar, o aviso "A análise semanal das vagas de Flutter
-falhou: …" (ou "de Mobile") chega no Telegram na próxima rodada do bot.
+Os arquivos são `analise-vagas-AAAA-MM-DD-HHMM.md` e `.csv` (Flutter), `analise-vagas-mobile-AAAA-MM-DD-HHMM.md` e
+`.csv` (mobile) e `analise-vagas-backend-AAAA-MM-DD-HHMM.md` e `.csv` (back-end), no horário de Brasília. Se a análise
+falhar, o aviso "A análise semanal das vagas de Flutter falhou: …" (ou "de Mobile", "de Back-end") chega no Telegram
+na próxima rodada do bot.
 
 ### 5. Ligar o agendamento
 
 ```bash
-sudo systemctl enable --now vagas-analysis.timer vagas-analysis-mobile.timer
+sudo systemctl enable --now vagas-analysis.timer vagas-analysis-mobile.timer vagas-analysis-backend.timer
 systemctl list-timers 'vagas-analysis*'
 ```
 
@@ -214,7 +225,7 @@ systemctl list-timers 'vagas-analysis*'
 ```bash
 sudo systemctl disable --now vagas-bot.timer
 # só a análise:
-sudo systemctl disable --now vagas-analysis.timer vagas-analysis-mobile.timer
+sudo systemctl disable --now vagas-analysis.timer vagas-analysis-mobile.timer vagas-analysis-backend.timer
 ```
 
 ## Voltar para o GitHub (rollback)

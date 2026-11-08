@@ -1,0 +1,14 @@
+# Schedule of the weekly back-end job analysis. The times are already Brasília time (the zone is in OnCalendar): do not convert to UTC.
+[Unit]
+Description=Weekly back-end job analysis schedule (Brasília time)
+
+[Timer]
+# Every Monday at 9h, after the Flutter (8h) and mobile (8h30) analyses (all call the Claude API)
+OnCalendar=Mon *-*-* 09:00:00 America/Sao_Paulo
+AccuracySec=1s
+RandomizedDelaySec=60
+# Runs the analysis missed while the VPS was off
+Persistent=true
+
+[Install]
+WantedBy=timers.target
