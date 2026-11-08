@@ -227,7 +227,7 @@ DIAS_BUSCA_REMOTAR = 30
 | `termo` | Termo de busca (o Remotar também procura na descrição) | qualquer string |
 | `modalidades` | Modalidades aceitas (lista vazia = qualquer uma) | `'remote'` · `'hybrid'` · `'on-site'` |
 
-A busca do Remotar também traz vagas que só citam o termo na descrição; só vai para o grupo quem tiver `TERMO_OBRIGATORIO_TITULO` no título. Com `IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR = True`, vagas de empresas de fora do Brasil (salário em dólar/euro ou marcadas como "Vaga internacional") ficam de fora. Vagas publicadas há mais de `DIAS_BUSCA_REMOTAR` dias são ignoradas. O código fica em `remotar.py`.
+A busca do Remotar também traz vagas que só citam o termo na descrição; só vai para o grupo quem tiver Flutter ou mobile no título (`job_track.py`). Com `IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR = True`, vagas de empresas de fora do Brasil (salário em dólar/euro ou marcadas como "Vaga internacional") ficam de fora. Vagas publicadas há mais de `DIAS_BUSCA_REMOTAR` dias são ignoradas. O código fica em `remotar.py`.
 
 ---
 
@@ -378,13 +378,16 @@ FILTROS_SOLIDES = [
 
 ### B. Perfil — filtros que bloqueiam vagas
 
-#### `TERMO_OBRIGATORIO_TITULO`
+#### Título: Flutter ou mobile (`job_track.py`)
 
-Palavra que precisa aparecer no **título** da vaga, em todas as fontes. Vaga sem ela é descartada. A comparação é por palavra inteira e ignora maiúsculas: `"flutter"` aceita "Desenvolvedor FLUTTER Pleno", mas não "Flutterwave Analyst".
+O **título** da vaga precisa ser de Flutter ou de mobile, em todas as fontes. Vaga sem nenhum dos termos é descartada. A comparação é por palavra inteira e ignora maiúsculas: `"flutter"` aceita "Desenvolvedor FLUTTER Pleno", mas não "Flutterwave Analyst"; `"ios"` não pega "Negócios".
 
 ```python
-TERMO_OBRIGATORIO_TITULO = "flutter"
+FLUTTER_TITLE_TERMS = ("flutter",)
+MOBILE_TITLE_TERMS = ("mobile", "android", "kotlin", "ios", "swift", "react native", "react-native")
 ```
+
+Título com "flutter" é sempre Flutter, mesmo que diga "mobile". As duas vão para o mesmo grupo, com o cabeçalho do filtro (`FLUTTER · REMOTO`, `MOBILE · REMOTO`, `MOBILE · ANDROID · REMOTO`...), e cada uma tem a sua análise (veja "Análise das vagas").
 
 ---
 
@@ -476,6 +479,7 @@ uv run analyze_descriptions.py --resume <caminho do .tex>
 
 Rode da raiz do repositório. Opções:
 
+- `--track flutter|mobile`: grupo de vagas analisado (padrão `flutter`). `mobile` pega as vagas com mobile, Android, iOS, Kotlin, Swift ou React Native no título e sem "flutter", e grava em `reports/analise-vagas-mobile-AAAA-MM-DD-HHMM.md` e `.csv`. As vagas antigas, de antes da busca de mobile, ficam em `flutter`.
 - `--since-days N`: só descrições salvas nos últimos N dias.
 - `--seniority TEXTO`: filtra por senioridade (ex.: `pleno`); procura na senioridade e no título.
 - `--max-new N`: teto de vagas novas enviadas à IA por análise (padrão 400); o resto fica para a próxima.

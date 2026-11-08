@@ -24,6 +24,7 @@ from description_extractor import (  # noqa: E402
 )
 from fake_store import FakeStore  # noqa: E402
 from job_analysis import Category, ItemOrigin  # noqa: E402
+from job_track import Track  # noqa: E402
 from store import Source, StoreError  # noqa: E402
 
 NOW = datetime(2026, 11, 2, 11, 0, tzinfo=timezone.utc)  # 08:00 in Brasília
@@ -244,6 +245,43 @@ class RunTest(AnalyzeTestCase):
         self.extractor.extract = mock.Mock(side_effect=ExtractionError("no key", ExtractionFailure.MISSING_KEY))
         with self.assertRaises(ExtractionError):
             self.go()
+
+
+class TrackTest(AnalyzeTestCase):
+    def go_track(self, track):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return ad.run(
+                self.db, self.extractor, ExtractionCache(self.cache_path),
+                resume_text=None, since=None, seniority=None, max_new=100, now=NOW,
+                out_dir=self.out_dir, learned_path=self.learned_path, track=track,
+            )
+
+    def add_both_tracks(self):
+        self.add_saved("Desenvolvedor Flutter", "Flutter e Riverpod.")
+        self.add_saved("Dev Mobile Flutter", "Flutter e Bloc.")
+        self.add_saved("Dev 3", "Flutter e Docker.")
+        self.add_saved("Desenvolvedor Android Sênior", "Kotlin e Jetpack Compose.")
+        self.add_saved("Engenheiro iOS", "Swift e SwiftUI.")
+
+    def test_flutter_track_keeps_flutter_and_untagged_titles(self):
+        self.add_both_tracks()
+        report = self.go_track(Track.FLUTTER)
+        self.assertEqual(report.total_jobs, 3)
+        self.assertTrue((self.out_dir / "analise-vagas-2026-11-02-0800.md").exists())
+
+    def test_mobile_track_keeps_only_mobile_titles_in_its_own_file(self):
+        self.add_both_tracks()
+        report = self.go_track(Track.MOBILE)
+        self.assertEqual(report.total_jobs, 2)
+        md = self.out_dir / "analise-vagas-mobile-2026-11-02-0800.md"
+        self.assertIn("# Análise das vagas de Mobile", md.read_text(encoding="utf-8"))
+        self.assertTrue((self.out_dir / "analise-vagas-mobile-2026-11-02-0800.csv").exists())
+        self.assertFalse((self.out_dir / "analise-vagas-2026-11-02-0800.md").exists())
+
+    def test_report_paths_per_track(self):
+        md, csv_file = ad.report_paths(Path("out"), NOW, Track.MOBILE)
+        self.assertEqual(md, Path("out/analise-vagas-mobile-2026-11-02-0800.md"))
+        self.assertEqual(csv_file, Path("out/analise-vagas-mobile-2026-11-02-0800.csv"))
 
 
 class CacheAndLimitsTest(AnalyzeTestCase):
@@ -640,7 +678,20 @@ class MainTest(unittest.TestCase):
         alerts = self.alerts()
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0].label, Source.ANALYSIS.api_value)
-        self.assertEqual(alerts[0].text, f"A análise semanal das vagas falhou: Não foi possível ler o currículo em {missing}.")
+        self.assertEqual(alerts[0].text, f"A análise semanal das vagas de Flutter falhou: Não foi possível ler o currículo em {missing}.")
+
+    def test_track_argument(self) -> None:
+        self.call_main()
+        self.call_main("--track", "mobile")
+        self.assertEqual([call["track"] for call in self.run_calls], [Track.FLUTTER, Track.MOBILE])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            ad.main(["--track", "ios"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_mobile_failure_alert_names_the_track(self) -> None:
+        missing = self.tmp / "nope.tex"
+        self.call_main("--resume", str(missing), "--track", "mobile")
+        self.assertTrue(self.alerts()[0].text.startswith("A análise semanal das vagas de Mobile falhou:"))
 
     def test_alert_write_failure_is_ignored(self) -> None:
         missing = self.tmp / "nope.tex"

@@ -314,7 +314,7 @@ class ReportTests(unittest.TestCase):
 
     def test_render_markdown_sections_in_order(self):
         text = ja.render_markdown(self.full_report())
-        self.assertTrue(text.startswith("# Análise das vagas — 20/11/2026 09:30\n"))
+        self.assertTrue(text.startswith("# Análise das vagas de Flutter — 20/11/2026 09:30\n"))
         self.assertTrue(text.endswith("\n"))
         titles = ["## Cobertura do seu currículo", "## Critérios eliminatórios", "## O que ajustar primeiro",
                   "## Diferenciais das vagas sênior", "## Para o perfil da Gupy e do LinkedIn",

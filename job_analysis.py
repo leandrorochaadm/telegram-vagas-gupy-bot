@@ -22,6 +22,7 @@ from description_extractor import (
     ResumeProfile,
     WorkModel,
 )
+from job_track import Track
 from tech_terms import MAX_TERM_CHARS, find_technologies, normalize
 
 
@@ -408,6 +409,7 @@ class Report:
     knockout: KnockoutSummary
     resume: ResumeProfile | None
     resume_check_failed: bool
+    track: Track = Track.FLUTTER
 
 
 _ENGLISH_LABELS = {
@@ -638,7 +640,7 @@ def render_markdown(report: Report) -> str:
     with_resume = report.resume is not None or report.resume_check_failed
     filters = report.filters.strip() or "nenhum"
     sections = [
-        f"# Análise das vagas — {local:%d/%m/%Y %H:%M}\n"
+        f"# Análise das vagas de {report.track.label} — {local:%d/%m/%Y %H:%M}\n"
         f"**{_count(report.total_jobs, 'vaga analisada', 'vagas analisadas')}** · "
         f"{_count(report.duplicate_jobs, 'repetida foi juntada', 'repetidas foram juntadas')} · filtros: {filters}\n"
         f"{_count(report.skipped_jobs, 'vaga não pôde ser analisada', 'vagas não puderam ser analisadas')}. "

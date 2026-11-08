@@ -5,8 +5,9 @@
 # ///
 """Analisa as descrições de vagas salvas e grava um relatório (.md) e uma planilha (.csv).
 
-Lê as descrições `saved` do banco, extrai habilidades e requisitos de cada vaga com a IA (com cache local),
-compara com o currículo e grava os arquivos em `reports/` com a data e hora de Brasília no nome.
+Lê as descrições `saved` do banco de um grupo de vagas (`--track flutter` ou `--track mobile`), extrai
+habilidades e requisitos de cada vaga com a IA (com cache local), compara com o currículo e grava os arquivos
+em `reports/` com o grupo e a data e hora de Brasília no nome.
 Este módulo tem o `run`; a linha de comando (argumentos, chave da API, currículo) fica no `main`.
 """
 import argparse
@@ -37,6 +38,7 @@ from description_extractor import (
     make_client,
 )
 from env_file import load_env_file
+from job_track import Track, analysis_track
 from job_analysis import (
     REPORT_TIMEZONE,
     TOP_N,
@@ -77,19 +79,20 @@ DEFAULT_ENV_FILE = "/etc/vagas-bot/bot.env"
 ENV_RESUME_PATH = "RESUME_PATH"
 ALERT_LABEL = "Análise das vagas"  # texto de tela; o passo 09 grava o aviso com Source.ANALYSIS.api_value
 CACHE_SAVE_EVERY = 25
-REPORT_FILE_PREFIX = "analise-vagas-"
+# One report file per track, so the mobile jobs never mix with the Flutter ones
+REPORT_FILE_PREFIXES = {Track.FLUTTER: "analise-vagas-", Track.MOBILE: "analise-vagas-mobile-"}
 REPORT_STAMP_FORMAT = "%Y-%m-%d-%H%M"
 MSG_NO_DESCRIPTIONS = "Nenhuma descrição salva para analisar com esses filtros."
 MSG_NOTHING_ANALYZED = "Nenhuma vaga pôde ser analisada agora. Rode de novo mais tarde."
 LOCAL_ENV_FILE = Path(__file__).resolve().parent / ".env"
-LOG_HINT = "Detalhes: journalctl -u vagas-analysis.service -n 50"
+LOG_HINT = "Detalhes: journalctl -u vagas-analysis.service -u vagas-analysis-mobile.service -n 50"
 MSG_MISSING_KEY = "Falta a chave da API do Claude (ANTHROPIC_API_KEY) no arquivo de configuração {path}."
 MSG_STORE = "Não foi possível ler o banco de vagas: {error}"
 MSG_RESUME = "Não foi possível ler o currículo em {path}."
 MSG_ENV_FILE = "Não foi possível ler o arquivo de configuração {path}."
 MSG_UNEXPECTED = "Erro inesperado ({kind}). " + LOG_HINT
 MSG_ALL_EXTRACTIONS_FAILED = "Nenhuma vaga foi analisada porque todas as chamadas à API do Claude falharam. " + LOG_HINT
-MSG_ALERT_TEXT = "A análise semanal das vagas falhou: {reason}."
+MSG_ALERT_TEXT = "A análise semanal das vagas de {track} falhou: {reason}."
 MSG_ALERT_NOT_SAVED = "Não foi possível guardar o aviso da falha: {error}"
 MSG_REPORT_SAVED = "Relatório gravado em {path}"
 MSG_CSV_SAVED = "Planilha gravada em {path}"
@@ -106,9 +109,9 @@ def _require_aware(moment: datetime) -> None:
         raise ValueError("datetime without time zone")
 
 
-def report_paths(out_dir: Path, now: datetime) -> tuple[Path, Path]:
+def report_paths(out_dir: Path, now: datetime, track: Track = Track.FLUTTER) -> tuple[Path, Path]:
     _require_aware(now)
-    stem = REPORT_FILE_PREFIX + now.astimezone(REPORT_TIMEZONE).strftime(REPORT_STAMP_FORMAT)
+    stem = REPORT_FILE_PREFIXES[track] + now.astimezone(REPORT_TIMEZONE).strftime(REPORT_STAMP_FORMAT)
     return out_dir / f"{stem}.md", out_dir / f"{stem}.csv"
 
 
@@ -138,10 +141,14 @@ def _better_duplicate_key(row: SavedDescription) -> tuple[int, float, str]:
     return (-len(row.description.strip()), -finished, row.id)
 
 
-def select_descriptions(rows: list[SavedDescription], seniority: str | None) -> Selection:
+def select_descriptions(
+    rows: list[SavedDescription], seniority: str | None, track: Track = Track.FLUTTER
+) -> Selection:
     empty_jobs = 0
     candidates: list[SavedDescription] = []
     for row in rows:
+        if analysis_track(row.title) is not track:
+            continue
         if row.description.strip() == "":
             empty_jobs += 1
             continue
@@ -459,10 +466,11 @@ def run(
     now: datetime,
     out_dir: Path,
     learned_path: Path = LEARNED_TERMS_PATH,
+    track: Track = Track.FLUTTER,
 ) -> Report | None:
     _require_aware(now)
     rows = db.saved_descriptions(since)
-    selection = select_descriptions(rows, seniority)
+    selection = select_descriptions(rows, seniority, track)
     if not selection.kept:
         print(MSG_NO_DESCRIPTIONS)
         return None
@@ -513,9 +521,10 @@ def run(
         knockout=summarize_knockout(jobs, profile),
         resume=profile,
         resume_check_failed=check_failed,
+        track=track,
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-    markdown_path, csv_path = report_paths(out_dir, now)
+    markdown_path, csv_path = report_paths(out_dir, now, track)
     markdown_path.write_text(render_markdown(report), encoding="utf-8")
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         handle.write(render_csv(report))
@@ -539,6 +548,14 @@ def _non_negative_int(raw: str) -> int:
     return value
 
 
+def _track(raw: str) -> Track:
+    try:
+        return Track.from_api(raw)
+    except ValueError:
+        options = ", ".join(track.api_value for track in Track)
+        raise argparse.ArgumentTypeError(f"use um destes: {options}") from None
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analisa as descrições de vagas salvas e grava um relatório.")
     parser.add_argument("--resume", default=None, help="caminho do currículo em .tex")
@@ -549,6 +566,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help=f"máximo de vagas novas para a IA ler (padrão {MAX_NEW_EXTRACTIONS})",
     )
     parser.add_argument("--env-file", default=None, help="arquivo de configuração (KEY=valor)")
+    parser.add_argument(
+        "--track", type=_track, default=Track.FLUTTER,
+        help="grupo de vagas: flutter (padrão) ou mobile (título com mobile, android, ios... e sem flutter)",
+    )
     return parser.parse_args(argv)
 
 
@@ -566,8 +587,8 @@ def resolve_resume_path(explicit: str | None) -> Path | None:
     return Path(from_env) if from_env else None
 
 
-def record_failure_alert(db: store.Store | None, reason: str) -> None:
-    text = MSG_ALERT_TEXT.format(reason=reason.rstrip("."))
+def record_failure_alert(db: store.Store | None, reason: str, track: Track = Track.FLUTTER) -> None:
+    text = MSG_ALERT_TEXT.format(track=track.label, reason=reason.rstrip("."))
     try:
         if db is None:
             db = store.from_env()
@@ -581,9 +602,9 @@ def record_failure_alert(db: store.Store | None, reason: str) -> None:
         print(MSG_ALERT_NOT_SAVED.format(error=error), file=sys.stderr)
 
 
-def _fail(message: str, db: store.Store | None) -> int:
+def _fail(message: str, db: store.Store | None, track: Track) -> int:
     print(message, file=sys.stderr)
-    record_failure_alert(db, message)
+    record_failure_alert(db, message, track)
     return 1
 
 
@@ -593,7 +614,7 @@ def main(argv: Sequence[str] = ()) -> int:
     try:
         load_env_file(str(env_path))
     except OSError:
-        return _fail(MSG_ENV_FILE.format(path=env_path), None)
+        return _fail(MSG_ENV_FILE.format(path=env_path), None, args.track)
 
     resume_path = resolve_resume_path(args.resume)
     raw: str | None = None
@@ -602,14 +623,14 @@ def main(argv: Sequence[str] = ()) -> int:
             raw = resume_path.read_text(encoding="utf-8")
             tex_to_text(raw)
         except (OSError, UnicodeDecodeError, ValueError):
-            return _fail(MSG_RESUME.format(path=resume_path), None)
+            return _fail(MSG_RESUME.format(path=resume_path), None, args.track)
 
     missing_key = MSG_MISSING_KEY.format(path=env_path)
     try:
         client = make_client()
     except ExtractionError as error:
         if error.kind is ExtractionFailure.MISSING_KEY:
-            return _fail(missing_key, None)
+            return _fail(missing_key, None, args.track)
         raise
 
     try:
@@ -625,26 +646,26 @@ def main(argv: Sequence[str] = ()) -> int:
         report = run(
             db, ClaudeExtractor(client), ExtractionCache(CACHE_PATH),
             resume_text=raw, since=since, seniority=args.seniority, max_new=args.max_new, now=now,
-            out_dir=REPORTS_DIR, learned_path=LEARNED_TERMS_PATH,
+            out_dir=REPORTS_DIR, learned_path=LEARNED_TERMS_PATH, track=args.track,
         )
     except StoreError as error:
         print(MSG_STORE.format(error=error), file=sys.stderr)
         return 1
     except AllExtractionsFailed as error:
         print(error.cause, file=sys.stderr)
-        return _fail(MSG_ALL_EXTRACTIONS_FAILED, db)
+        return _fail(MSG_ALL_EXTRACTIONS_FAILED, db, args.track)
     except ExtractionError as error:
         if error.kind is ExtractionFailure.MISSING_KEY:
-            return _fail(missing_key, db)
+            return _fail(missing_key, db, args.track)
         traceback.print_exc()
-        return _fail(MSG_UNEXPECTED.format(kind=type(error).__name__), db)
+        return _fail(MSG_UNEXPECTED.format(kind=type(error).__name__), db, args.track)
     except Exception as error:
         traceback.print_exc()
-        return _fail(MSG_UNEXPECTED.format(kind=type(error).__name__), db)
+        return _fail(MSG_UNEXPECTED.format(kind=type(error).__name__), db, args.track)
 
     if report is None:
         return 0
-    markdown_path, csv_path = report_paths(REPORTS_DIR, now)
+    markdown_path, csv_path = report_paths(REPORTS_DIR, now, args.track)
     print(MSG_REPORT_SAVED.format(path=markdown_path))
     print(MSG_CSV_SAVED.format(path=csv_path))
     return 0

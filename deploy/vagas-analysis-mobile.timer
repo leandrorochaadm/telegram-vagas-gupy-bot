@@ -1,0 +1,14 @@
+# Schedule of the weekly mobile job analysis. The times are already Brasília time (the zone is in OnCalendar): do not convert to UTC.
+[Unit]
+Description=Weekly mobile job analysis schedule (Brasília time)
+
+[Timer]
+# Every Monday at 8h30, after the Flutter analysis (both call the Claude API)
+OnCalendar=Mon *-*-* 08:30:00 America/Sao_Paulo
+AccuracySec=1s
+RandomizedDelaySec=60
+# Runs the analysis missed while the VPS was off
+Persistent=true
+
+[Install]
+WantedBy=timers.target

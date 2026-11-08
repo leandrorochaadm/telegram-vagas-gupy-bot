@@ -52,9 +52,31 @@ class AnalysisUnitsTest(unittest.TestCase):
         self.assertIn("pocketbase-job-search.service", service["Unit"]["After"])
         self.assertTrue(os.path.isfile(os.path.join(ROOT, "analyze_descriptions.py")))
 
+    def test_mobile_units_mirror_the_flutter_ones(self):
+        timer = read_unit("vagas-analysis-mobile.timer")
+        flutter_timer = read_unit("vagas-analysis.timer")
+        self.assertEqual(timer["Timer"]["OnCalendar"], "Mon *-*-* 08:30:00 America/Sao_Paulo")
+        for key in ("Persistent", "RandomizedDelaySec", "AccuracySec"):
+            self.assertEqual(timer["Timer"][key], flutter_timer["Timer"][key], key)
+        self.assertEqual(timer["Install"]["WantedBy"], "timers.target")
+        service = read_unit("vagas-analysis-mobile.service")
+        flutter = read_unit("vagas-analysis.service")
+        self.assertEqual(
+            service["Service"]["ExecStart"],
+            "/home/deploy/.local/bin/uv run --script analyze_descriptions.py --track mobile",
+        )
+        for key in ("Type", "User", "Group", "WorkingDirectory", "EnvironmentFile", "Environment",
+                    "TimeoutStartSec", "MemoryMax", "NoNewPrivileges", "PrivateTmp"):
+            self.assertEqual(service["Service"][key], flutter["Service"][key], key)
+        self.assertIn("vagas-analysis.service", service["Unit"]["After"].split())
+        for section in service.sections():
+            self.assertNotIn("OnFailure", service[section])
+
     def test_script_log_hint_names_the_unit(self):
         with open(os.path.join(ROOT, "analyze_descriptions.py"), encoding="utf-8") as f:
-            self.assertIn("vagas-analysis.service", f.read())
+            text = f.read()
+        self.assertIn("vagas-analysis.service", text)
+        self.assertIn("vagas-analysis-mobile.service", text)
 
     def test_env_example_and_gitignore(self):
         lines = read_lines(os.path.join(DEPLOY, "bot.env.example"))
