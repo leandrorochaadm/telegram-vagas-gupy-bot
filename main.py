@@ -15,6 +15,7 @@ import gupy
 from env_file import load_env_file
 from http_proxy import scraper_proxies, warp_is_on
 import inhire_discovery
+import job_track
 import job_details  # module import, so tests can patch main.job_details.fetch_details
 import linkedin_login
 import linkedin_posts
@@ -66,7 +67,12 @@ USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # workplaceType válidos: 'remote' | 'hybrid' | 'on-site'
 FILTROS_GUPY = [
     {"nome": "FLUTTER · REMOTO", "params": {'workplaceType': 'remote', 'jobName': 'flutter', 'limit': 15}},
-    # {"nome": "MOBILE · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'mobile',  'limit': 10}},
+    {"nome": "MOBILE · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'mobile',  'limit': 15}},
+    {"nome": "MOBILE · ANDROID · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'android', 'limit': 15}},
+    {"nome": "MOBILE · iOS · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'ios',     'limit': 15}},
+    {"nome": "MOBILE · REACT NATIVE · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'react native', 'limit': 15}},
+    {"nome": "MOBILE · KOTLIN · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'kotlin',  'limit': 15}},
+    {"nome": "MOBILE · SWIFT · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'swift',   'limit': 15}},
 ]
 
 # ProgramaThor: busca por termo + slug de localidade da URL.
@@ -76,7 +82,12 @@ FILTROS_GUPY = [
 #   ''           → /jobs-flutter  (sem filtro de local)
 FILTROS_PROGRAMATHOR = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter", "local_filtro": "remoto"},
-    # {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "local_filtro": "remoto"},
+    # Não existe /jobs-mobile no ProgramaThor (404): busca pelas tecnologias
+    {"nome": "MOBILE · ANDROID · REMOTO",  "termo": "android", "local_filtro": "remoto"},
+    {"nome": "MOBILE · iOS · REMOTO",  "termo": "ios",     "local_filtro": "remoto"},
+    {"nome": "MOBILE · REACT NATIVE · REMOTO",  "termo": "react-native", "local_filtro": "remoto"},
+    {"nome": "MOBILE · KOTLIN · REMOTO",  "termo": "kotlin",  "local_filtro": "remoto"},
+    {"nome": "MOBILE · SWIFT · REMOTO",  "termo": "swift",   "local_filtro": "remoto"},
 ]
 
 # LinkedIn (API guest): keywords + localização + filtros de data e modalidade.
@@ -84,7 +95,8 @@ FILTROS_PROGRAMATHOR = [
 # Para outros países, altere o campo "location".
 FILTROS_LINKEDIN = [
     {"nome": "FLUTTER · REMOTO", "params": {"keywords": "flutter", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
-    # {"nome": "MOBILE · REMOTO",  "params": {"keywords": "mobile developer", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
+    # Uma busca só para mobile (o LinkedIn recusa com 429 quando há muitas): "OR" é operador do LinkedIn
+    {"nome": "MOBILE · REMOTO",  "params": {"keywords": 'mobile OR android OR ios OR "react native" OR kotlin OR swift', "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
 ]
 PAGINAS_LINKEDIN = 5  # a API guest devolve ~10 vagas por página
 # On 429, retry after growing pauses (or Retry-After, capped at the largest one), up to a total per run.
@@ -178,7 +190,12 @@ TERMOS_BLOQUEADOS_POSTS = ["netvagas"]
 # As empresas ficam na tabela inhire_tenants do banco (ver descoberta abaixo).
 FILTROS_INHIRE = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter"},
-    # {"nome": "MOBILE · REMOTO",  "termo": "mobile"},
+    {"nome": "MOBILE · REMOTO",  "termo": "mobile"},
+    {"nome": "MOBILE · ANDROID · REMOTO",  "termo": "android"},
+    {"nome": "MOBILE · iOS · REMOTO",  "termo": "ios"},
+    {"nome": "MOBILE · REACT NATIVE · REMOTO",  "termo": "react native"},
+    {"nome": "MOBILE · KOTLIN · REMOTO",  "termo": "kotlin"},
+    {"nome": "MOBILE · SWIFT · REMOTO",  "termo": "swift"},
 ]
 
 # Inhire — descoberta automática de empresas. A Inhire não publica a lista de
@@ -241,16 +258,27 @@ TAMANHO_MAX_AVISO = 3800
 # (ex: "remoto/flutter" só traz vagas remotas). Atenção: "todos/<termo>" ignora o termo.
 FILTROS_SOLIDES = [
     {"nome": "FLUTTER · REMOTO", "caminho": "remoto/flutter"},
-    # {"nome": "MOBILE · REMOTO",  "caminho": "remoto/mobile"},
+    {"nome": "MOBILE · REMOTO",  "caminho": "remoto/mobile"},
+    {"nome": "MOBILE · ANDROID · REMOTO",  "caminho": "remoto/android"},
+    {"nome": "MOBILE · iOS · REMOTO",  "caminho": "remoto/ios"},
+    {"nome": "MOBILE · REACT NATIVE · REMOTO",  "caminho": "remoto/react-native"},
+    {"nome": "MOBILE · KOTLIN · REMOTO",  "caminho": "remoto/kotlin"},
+    {"nome": "MOBILE · SWIFT · REMOTO",  "caminho": "remoto/swift"},
 ]
 # Seconds to wait before retrying a Solides page that came without the job list.
 PAUSA_NOVA_TENTATIVA_SOLIDES = 5
 
 # Remotar: busca pela API pública (api.remotar.com.br). A busca também olha a
-# descrição, mas só vai para o grupo quem tiver TERMO_OBRIGATORIO_TITULO no título.
+# descrição, mas só vai para o grupo quem tiver Flutter ou mobile no título (job_track.py).
 # 'modalidades': "remote" | "hybrid" | "on-site" (lista vazia = qualquer uma).
 FILTROS_REMOTAR = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter", "modalidades": ["remote"]},
+    {"nome": "MOBILE · REMOTO",  "termo": "mobile",  "modalidades": ["remote"]},
+    {"nome": "MOBILE · ANDROID · REMOTO",  "termo": "android", "modalidades": ["remote"]},
+    {"nome": "MOBILE · iOS · REMOTO",  "termo": "ios",     "modalidades": ["remote"]},
+    {"nome": "MOBILE · REACT NATIVE · REMOTO",  "termo": "react native", "modalidades": ["remote"]},
+    {"nome": "MOBILE · KOTLIN · REMOTO",  "termo": "kotlin",  "modalidades": ["remote"]},
+    {"nome": "MOBILE · SWIFT · REMOTO",  "termo": "swift",   "modalidades": ["remote"]},
 ]
 # Ignora vagas remotas de empresas de fora do Brasil (salário em dólar/euro ou marcadas como internacionais).
 IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR = True
@@ -266,9 +294,10 @@ DIAS_BUSCA_GUPY    = 10   # Gupy    → padrão: 10 dias
 DIAS_BUSCA_SOLIDES = 20  # Solides → padrão: 20 dias
 DIAS_BUSCA_REMOTAR = 30  # Remotar → padrão: 30 dias
 
-# A vaga só é enviada se o título contiver este termo (palavra inteira,
-# case-insensitive). É o único filtro aplicado ao título.
-TERMO_OBRIGATORIO_TITULO = "flutter"
+# A vaga só é enviada se o título for de Flutter ou de mobile (palavra inteira,
+# case-insensitive). Os termos ficam em job_track.py: FLUTTER_TITLE_TERMS e
+# MOBILE_TITLE_TERMS. Título com "flutter" é sempre Flutter, mesmo se disser "mobile".
+# Cada grupo tem a sua análise: analyze_descriptions.py --track flutter | mobile.
 
 # Vagas dessas empresas são ignoradas em todas as fontes.
 # A comparação é parcial e case-insensitive: "hired" também bloqueia "Hired Feed".
@@ -294,7 +323,6 @@ def _padrao_termos(termos):
     alternativas = "|".join(re.escape(t.lower()) for t in sorted(set(termos), key=len, reverse=True))
     return re.compile(rf"(?<!\w)(?:{alternativas})(?!\w)")
 
-_RE_TITULO     = _padrao_termos([TERMO_OBRIGATORIO_TITULO])
 _RE_POSTS      = [_padrao_termos(grupo) for grupo in TERMOS_OBRIGATORIOS_POSTS]
 
 def post_relevante(texto):
@@ -307,7 +335,7 @@ def post_bloqueado(texto, autor, link):
     return next((termo for termo in TERMOS_BLOQUEADOS_POSTS if termo.lower() in alvo), None)
 
 def titulo_relevante(titulo):
-    return _RE_TITULO.search(titulo.lower()) is not None
+    return job_track.track_of(titulo) is not None
 
 # --- 3. BANCO E TELEGRAM ---
 
@@ -598,7 +626,7 @@ def brave_due(db: Store, source: Source, interval_min, now=None):
 def filtros_basicos(titulo, empresa=None):
     """Retorna (bloqueada, motivo) com os filtros de perfil."""
     if not titulo_relevante(titulo):
-        return True, f"🚫 Sem \"{TERMO_OBRIGATORIO_TITULO}\" no título: {titulo[:55]}"
+        return True, f"🚫 Título sem Flutter nem mobile: {titulo[:55]}"
     if empresa:
         emp = empresa.lower()
         for emp_ignorada in EMPRESAS_IGNORADAS:

@@ -247,9 +247,9 @@ class BuscarVagasSolidesTest(unittest.TestCase):
         self.assertIn("Dev Flutter &amp; React &lt;Pleno&gt;", self.sent[0])
         self.assertIn("A&amp;B", self.sent[0])
 
-    def test_skips_title_without_flutter(self):
-        self.run_with_pages(([make_vaga(title="Desenvolvedor React Native")], 1, {}))
-        self.assertEqual(self.sent, [])
+    def test_sends_android_title_without_flutter(self):
+        self.run_with_pages(([make_vaga(title="Desenvolvedor Android")], 1, {}))
+        self.assertEqual(len(self.sent), 1)
 
     def test_skips_ignored_company(self):
         self.run_with_pages(([make_vaga(companyName="Jobgether")], 1, {}))
@@ -347,9 +347,9 @@ class BuscarVagasSolidesStoreTest(unittest.TestCase):
         self.assertIn("Dev Flutter &amp; React &lt;Pleno&gt;", self.sent[0])
         self.assertIn("A&amp;B", self.sent[0])
 
-    def test_skips_title_without_flutter(self):
-        self.run_with_pages(([make_vaga(title="Desenvolvedor React Native")], 1, {}))
-        self.assertEqual(self.sent, [])
+    def test_sends_android_title_without_flutter(self):
+        self.run_with_pages(([make_vaga(title="Desenvolvedor Android")], 1, {}))
+        self.assertEqual(len(self.sent), 1)
 
     def test_skips_ignored_company(self):
         self.run_with_pages(([make_vaga(companyName="Jobgether")], 1, {}))

@@ -167,6 +167,10 @@ class SearchJobsTest(unittest.TestCase):
         self.run_with([response([api_job(name="UX Writer")]), response([])])
         self.send.assert_not_called()
 
+    def test_sends_mobile_title_without_flutter(self):
+        self.run_with([response([api_job(name="Desenvolvedor Android Pleno")]), response([])])
+        self.send.assert_called_once()
+
     def test_skips_jobs_from_other_countries(self):
         jobs = [api_job(1, country="Portugal"), api_job(2, country="Brasil"), api_job(3)]
         self.run_with([response(jobs), response([])])
