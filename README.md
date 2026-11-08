@@ -327,12 +327,14 @@ A InHire não publica a lista de empresas: a busca de vagas precisa do subdomín
 FILTROS_INHIRE = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter"},
     {"nome": "MOBILE · REMOTO",  "termo": "mobile"},
+    {"nome": "BACKEND · REMOTO",  "grupo": job_track.Track.BACKEND},
 ]
 ```
 
 | Campo | Descrição | Valores válidos |
 |---|---|---|
 | `termo` | Termo buscado no título da vaga (palavra inteira) | qualquer string |
+| `grupo` | No lugar de `termo`: aceita o título que o `job_track.py` põe nesse grupo (todas as grafias de back-end) | `job_track.Track.BACKEND` (ou outro grupo) |
 
 Só entram vagas remotas da InHire.
 

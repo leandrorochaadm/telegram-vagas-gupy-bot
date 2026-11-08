@@ -201,10 +201,9 @@ FILTROS_INHIRE = [
     {"nome": "MOBILE · REACT NATIVE · REMOTO",  "termo": "react native"},
     {"nome": "MOBILE · KOTLIN · REMOTO",  "termo": "kotlin"},
     {"nome": "MOBILE · SWIFT · REMOTO",  "termo": "swift"},
-    # O termo é procurado no título como palavra inteira: uma grafia por filtro
-    {"nome": "BACKEND · REMOTO",  "termo": "backend"},
-    {"nome": "BACKEND · BACK-END · REMOTO",  "termo": "back-end"},
-    {"nome": "BACKEND · BACK END · REMOTO",  "termo": "back end"},
+    # "grupo" no lugar de "termo": usa a regra de título do job_track.py, que aceita
+    # todas as grafias (backend, back-end, back end, back_end, hífen especial)
+    {"nome": "BACKEND · REMOTO",  "grupo": job_track.Track.BACKEND},
 ]
 
 # Inhire — descoberta automática de empresas. A Inhire não publica a lista de
@@ -400,6 +399,7 @@ _queue_jobs = False
 ALERT_SENT_NOT_SAVED = "uma vaga foi enviada mas não ficou registrada: {title}. Ela pode chegar repetida uma vez."
 ALERT_DUPLICATE_NOT_SAVED = "uma vaga repetida não ficou registrada: {title}. Ela pode chegar repetida uma vez."
 ALERT_DESCRIPTION_NOT_QUEUED = "a descrição de uma vaga não vai ser guardada: {title}."
+ALERT_ANALYSIS_ONLY_NOT_SAVED = "uma vaga de back-end não foi guardada para a análise: {title}. Tento de novo na próxima rodada."
 ALERT_BACKFILL_NOT_DONE = "Não foi possível recuperar as descrições das vagas antigas: {error}. Rode de novo."
 ALERT_DESCRIPTIONS_GAVE_UP = "Fiquei sem a descrição destas vagas depois de 3 dias tentando: {titles}."
 ALERT_DESCRIPTIONS_NOT_FETCHED = "Não foi possível buscar as descrições das vagas: {error}. Tento de novo na próxima rodada."
@@ -516,6 +516,7 @@ def guardar_so_para_analise(db: Store, link, titulo, empresa, data_f, fonte: Sou
         db.mark_analysis_only(link, data_f, titulo)
     except StoreError as erro:
         print(f"   ⚠️  Não guardei para a análise ({erro}): {titulo[:50]}")
+        anotar_avisos(Source.BOT, [ALERT_ANALYSIS_ONLY_NOT_SAVED.format(title=titulo[:60])])
         return
     print(f"   📊 Só para a análise: {titulo[:50]}")
 
@@ -655,6 +656,14 @@ def brave_due(db: Store, source: Source, interval_min, now=None):
     # Saved before searching: a failed search still spends quota
     db.set_brave_searched_at(source.api_value, now)
     return True
+
+def _titulo_do_filtro_inhire(filtro):
+    """Title test of an Inhire filter: the track's rule ("grupo") or one whole-word term ("termo")."""
+    grupo = filtro.get('grupo')
+    if grupo is not None:
+        return lambda titulo: job_track.track_of(titulo) is grupo
+    padrao = _padrao_termos([filtro['termo']])
+    return lambda titulo: padrao.search(titulo.lower()) is not None
 
 def filtros_basicos(titulo, empresa=None):
     """Retorna (bloqueada, motivo) com os filtros de perfil."""
@@ -986,7 +995,7 @@ def _varrer_inhire(db, erros):
         proxy=SCRAPER_PROXY,
     )
     print(f"   📋 {len(empresas)} empresas para verificar")
-    filtros = [(filtro, _padrao_termos([filtro['termo']])) for filtro in FILTROS_INHIRE]
+    filtros = [(filtro, _titulo_do_filtro_inhire(filtro)) for filtro in FILTROS_INHIRE]
     sem_resposta = []
     erro_leitura = []
     inexistentes = []
@@ -1016,14 +1025,14 @@ def _varrer_inhire(db, erros):
                 print("   🔚 Nenhuma vaga encontrada.")
                 continue
 
-            for filtro, padrao_termo in filtros:
+            for filtro, titulo_do_filtro in filtros:
                 for job in jobs:
                     if job.get('status') != 'published':
                         continue
 
                     # Fields may come as null: .get(key, default) does not cover that
                     titulo = job.get('displayName') or 'Título Indisponível'
-                    if not padrao_termo.search(titulo.lower()):
+                    if not titulo_do_filtro(titulo):
                         continue
 
                     if (job.get('workplaceType') or '').lower() != 'remote':

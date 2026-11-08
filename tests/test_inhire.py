@@ -170,6 +170,45 @@ class BuscarVagasInhireTest(unittest.TestCase):
         self.assertIn("database is locked", self.telegram.call_args.args[0])
 
 
+class BackendAcrossRunsTest(unittest.TestCase):
+    """A back-end job found in one run is kept for the analysis once and skipped in the next runs."""
+
+    def setUp(self):
+        self.db = FakeStore()
+        self.db.add_inhire_tenants(["acme"], NOW)
+        patches = [
+            mock.patch.object(main.inhire_discovery, "discover",
+                              side_effect=lambda db, **kw: inhire_discovery.load_tenants(db)),
+            mock.patch.object(main, "enviar_telegram", return_value=True),
+            mock.patch.object(main.time, "sleep"),
+        ]
+        _, self.telegram, _ = [p.start() for p in patches]
+        for p in patches:
+            self.addCleanup(p.stop)
+        for state in (main._enviados_sessao, main._falhas_envio, main._avisos):
+            state.clear()
+            self.addCleanup(state.clear)
+
+    def scan(self):
+        page = jobs_page(job(title="Desenvolvedor Back-end Pleno", job_id="7"))
+        with mock.patch.object(main.requests, "get", return_value=page), \
+             mock.patch.object(main, "registrar_e_enviar", wraps=main.registrar_e_enviar) as send:
+            main.buscar_vagas_inhire(self.db)
+        return send
+
+    def test_backend_job_is_kept_once_and_skipped_next_run(self):
+        first = self.scan()
+        self.assertEqual(first.call_count, 1)
+        self.assertEqual(len(self.db.analysis_only), 1)
+        link = next(iter(self.db.analysis_only))
+        self.assertIn(link, self.db.descriptions)
+        second = self.scan()
+        second.assert_not_called()
+        self.assertEqual(len(self.db.descriptions), 1)
+        self.telegram.assert_not_called()
+        self.assertEqual(main._avisos, [])
+
+
 class BuscarVagasInhireStoreTest(unittest.TestCase):
     def setUp(self):
         self.db = FakeStore()
@@ -244,6 +283,15 @@ class BuscarVagasInhireStoreTest(unittest.TestCase):
                   jobs_page())
         self.send.assert_called_once()
         self.assertIn("/vagas/3/", self.send.call_args.args[1])
+
+    def test_backend_filter_takes_every_spelling_and_leaves_mobile_out(self):
+        titles = ["Dev Backend", "Dev Back-end", "Dev Back End", "Dev Back_end", "Dev Back\u2011end",
+                  "Back-end Kotlin", "Dev Java"]
+        jobs = [job(title=title, job_id=str(n)) for n, title in enumerate(titles)]
+        with mock.patch.object(main, "FILTROS_INHIRE",
+                               [{"nome": "BACKEND · REMOTO", "grupo": main.job_track.Track.BACKEND}]):
+            self.scan(jobs_page(*jobs), jobs_page())
+        self.assertEqual([c.args[2] for c in self.send.call_args_list], titles[:5])
 
     def test_many_missing_tenants_are_kept_and_alerted(self):
         not_found = response(404, '{"message":"Tenant not found"}')

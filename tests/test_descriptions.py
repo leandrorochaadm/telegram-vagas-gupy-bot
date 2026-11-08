@@ -114,6 +114,8 @@ class QueueOnSendTest(DescriptionTestCase):
                                side_effect=StoreError("down", StoreFailure.UNAVAILABLE)):
             self.send(GUPY_LINK, title="Dev Backend")
         self.assertFalse(self.db.is_known(GUPY_LINK))
+        self.assertEqual(main._avisos, [
+            (Source.BOT, main.ALERT_ANALYSIS_ONLY_NOT_SAVED.format(title="Dev Backend"))])
         self.send(GUPY_LINK, title="Dev Backend")
         self.assertTrue(self.db.is_known(GUPY_LINK))
         self.telegram.assert_not_called()
