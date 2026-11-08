@@ -49,6 +49,7 @@ class FakeStore:
         self.fail_with = fail_with
         self.connected = False
         self.sent: dict[str, tuple[str, str]] = {}
+        self.analysis_only: dict[str, tuple[str, str]] = {}
         self._next_id = 0
         self._next_seq = 0
         self._queued: list[tuple[int, QueuedJob]] = []
@@ -85,6 +86,7 @@ class FakeStore:
             Collection.INHIRE_TENANTS: lambda: len(self._tenants),
             Collection.INHIRE_DISCOVERIES: lambda: int(self._discovery is not None),
             Collection.JOB_DESCRIPTIONS: lambda: len(self.descriptions),
+            Collection.ANALYSIS_ONLY_JOBS: lambda: len(self.analysis_only),
         }
         if collection not in counts:
             raise ValueError(f"not a data collection: {collection}")
@@ -105,6 +107,19 @@ class FakeStore:
     def mark_sent(self, link: str, published: str, title: str) -> None:
         self._check()
         self.sent.setdefault(link, (published, title))
+
+    # -- analysis_only_jobs ---------------------------------------------
+
+    def is_analysis_only(self, link: str) -> bool:
+        self._check()
+        return link in self.analysis_only
+
+    def mark_analysis_only(self, link: str, published: str, title: str) -> None:
+        self._check()
+        self.analysis_only.setdefault(link, (published, title))
+
+    def is_known(self, link: str) -> bool:
+        return self.is_sent(link) or self.is_analysis_only(link)
 
     def sent_jobs(self) -> list[SentJob]:
         self._check()

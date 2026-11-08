@@ -94,6 +94,35 @@ class QueueOnSendTest(DescriptionTestCase):
             (Source.BOT, main.ALERT_DESCRIPTION_NOT_QUEUED.format(title="Dev Flutter"))])
         self.sleep.assert_called_once_with(main.PAUSA_ENTRE_VAGAS)
 
+    def test_backend_job_is_kept_for_analysis_without_telegram(self):
+        self.send(GUPY_LINK, title="Desenvolvedor Back-end Java")
+        self.telegram.assert_not_called()
+        self.assertFalse(self.db.is_sent(GUPY_LINK))
+        self.assertTrue(self.db.is_known(GUPY_LINK))
+        self.assertEqual(self.db.descriptions[GUPY_LINK].status, DescriptionStatus.PENDING)
+        self.sleep.assert_not_called()
+
+    def test_backend_job_skips_the_queue(self):
+        main._queue_jobs = True
+        self.send(GUPY_LINK, title="Dev Backend")
+        self.assertEqual(self.db.queued_jobs(), [])
+        self.assertTrue(self.db.is_analysis_only(GUPY_LINK))
+        self.telegram.assert_not_called()
+
+    def test_backend_description_failure_leaves_job_for_next_run(self):
+        with mock.patch.object(self.db, "add_job_description",
+                               side_effect=StoreError("down", StoreFailure.UNAVAILABLE)):
+            self.send(GUPY_LINK, title="Dev Backend")
+        self.assertFalse(self.db.is_known(GUPY_LINK))
+        self.send(GUPY_LINK, title="Dev Backend")
+        self.assertTrue(self.db.is_known(GUPY_LINK))
+        self.telegram.assert_not_called()
+
+    def test_mobile_backend_title_is_still_sent(self):
+        self.send(GUPY_LINK, title="Back-end Kotlin")
+        self.telegram.assert_called_once()
+        self.assertTrue(self.db.is_sent(GUPY_LINK))
+
     def test_mark_sent_failure_creates_no_description(self):
         with mock.patch.object(self.db, "mark_sent", side_effect=StoreError("down", StoreFailure.UNAVAILABLE)):
             self.send(GUPY_LINK)

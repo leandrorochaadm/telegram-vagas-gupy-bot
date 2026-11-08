@@ -148,7 +148,7 @@ def search_jobs(db: Store, *, api_key, filters, pages, excluded_sites, required_
             if any(company in site.lower() for company in ignored):
                 print(f"   🚫 Site ignorado: {site[:50]}")
                 continue
-            if db.is_sent(link):
+            if db.is_known(link):
                 continue
 
             summary = text if len(text) <= SUMMARY_MAX_CHARS else text[:SUMMARY_MAX_CHARS].rsplit(" ", 1)[0] + "…"

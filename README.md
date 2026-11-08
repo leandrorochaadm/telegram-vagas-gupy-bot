@@ -227,7 +227,7 @@ DIAS_BUSCA_REMOTAR = 30
 | `termo` | Termo de busca (o Remotar também procura na descrição) | qualquer string |
 | `modalidades` | Modalidades aceitas (lista vazia = qualquer uma) | `'remote'` · `'hybrid'` · `'on-site'` |
 
-A busca do Remotar também traz vagas que só citam o termo na descrição; só vai para o grupo quem tiver Flutter ou mobile no título (`job_track.py`). Com `IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR = True`, vagas de empresas de fora do Brasil (salário em dólar/euro ou marcadas como "Vaga internacional") ficam de fora. Vagas publicadas há mais de `DIAS_BUSCA_REMOTAR` dias são ignoradas. O código fica em `remotar.py`.
+A busca do Remotar também traz vagas que só citam o termo na descrição; só fica quem tiver Flutter, mobile ou back-end no título (`job_track.py`). Com `IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR = True`, vagas de empresas de fora do Brasil (salário em dólar/euro ou marcadas como "Vaga internacional") ficam de fora. Vagas publicadas há mais de `DIAS_BUSCA_REMOTAR` dias são ignoradas. O código fica em `remotar.py`.
 
 ---
 
@@ -378,16 +378,20 @@ FILTROS_SOLIDES = [
 
 ### B. Perfil — filtros que bloqueiam vagas
 
-#### Título: Flutter ou mobile (`job_track.py`)
+#### Título: Flutter, mobile ou back-end (`job_track.py`)
 
-O **título** da vaga precisa ser de Flutter ou de mobile, em todas as fontes. Vaga sem nenhum dos termos é descartada. A comparação é por palavra inteira e ignora maiúsculas: `"flutter"` aceita "Desenvolvedor FLUTTER Pleno", mas não "Flutterwave Analyst"; `"ios"` não pega "Negócios".
+O **título** da vaga precisa ser de Flutter, de mobile ou de back-end, em todas as fontes. Vaga sem nenhum dos termos é descartada. A comparação é por palavra inteira e ignora maiúsculas: `"flutter"` aceita "Desenvolvedor FLUTTER Pleno", mas não "Flutterwave Analyst"; `"ios"` não pega "Negócios".
 
 ```python
 FLUTTER_TITLE_TERMS = ("flutter",)
 MOBILE_TITLE_TERMS = ("mobile", "android", "kotlin", "ios", "swift", "react native", "react-native")
+# "back" + separador opcional (hífen, hífen tipográfico, travessão, sublinhado ou espaço) + "end"
+BACKEND_TITLE_PATTERN = r"back[-\u2010\u2011\u2012\u2013\u2014_ ]?end"
 ```
 
-Título com "flutter" é sempre Flutter, mesmo que diga "mobile". As duas vão para o mesmo grupo, com o cabeçalho do filtro (`FLUTTER · REMOTO`, `MOBILE · REMOTO`, `MOBILE · ANDROID · REMOTO`...), e cada uma tem a sua análise (veja "Análise das vagas").
+Back-end é só a palavra, em qualquer grafia (`backend`, `back-end`, `back end`, `back_end`): título só com "Java" ou "Node" não conta. A prioridade é Flutter > mobile > back-end: "Fullstack Flutter + Back-end" é Flutter e "Back-end Kotlin" é mobile.
+
+Flutter e mobile vão para o mesmo grupo do Telegram, com o cabeçalho do filtro (`FLUTTER · REMOTO`, `MOBILE · REMOTO`, `MOBILE · ANDROID · REMOTO`...). **Vaga de back-end não vai ao Telegram**: o bot guarda a vaga na tabela `analysis_only_jobs` (para não processá-la de novo) e busca a descrição, só para a análise. Cada grupo tem a sua análise (veja "Análise das vagas").
 
 ---
 
@@ -479,7 +483,7 @@ uv run analyze_descriptions.py --resume <caminho do .tex>
 
 Rode da raiz do repositório. Opções:
 
-- `--track flutter|mobile`: grupo de vagas analisado (padrão `flutter`). `mobile` pega as vagas com mobile, Android, iOS, Kotlin, Swift ou React Native no título e sem "flutter", e grava em `reports/analise-vagas-mobile-AAAA-MM-DD-HHMM.md` e `.csv`. As vagas antigas, de antes da busca de mobile, ficam em `flutter`.
+- `--track flutter|mobile|backend`: grupo de vagas analisado (padrão `flutter`). `mobile` pega as vagas com mobile, Android, iOS, Kotlin, Swift ou React Native no título e sem "flutter", e grava em `reports/analise-vagas-mobile-AAAA-MM-DD-HHMM.md` e `.csv`. `backend` pega as vagas com back-end no título e sem Flutter nem mobile, e grava em `reports/analise-vagas-backend-AAAA-MM-DD-HHMM.md` e `.csv`. As vagas antigas, de antes da busca de mobile, ficam em `flutter`.
 - `--since-days N`: só descrições salvas nos últimos N dias.
 - `--seniority TEXTO`: filtra por senioridade (ex.: `pleno`); procura na senioridade e no título.
 - `--max-new N`: teto de vagas novas enviadas à IA por análise (padrão 400); o resto fica para a próxima.

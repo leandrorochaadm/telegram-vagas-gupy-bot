@@ -48,6 +48,7 @@ class Collection(StrEnum):
     INHIRE_TENANTS = "inhire_tenants"
     INHIRE_DISCOVERIES = "inhire_discoveries"
     JOB_DESCRIPTIONS = "job_descriptions"
+    ANALYSIS_ONLY_JOBS = "analysis_only_jobs"
 
 
 class _Field(StrEnum):
@@ -257,6 +258,7 @@ class Store:
         self._session = session or requests.Session()
         self._token: str | None = None
         self._sent_links: set[str] | None = None
+        self._analysis_only_links: set[str] | None = None
 
     def __repr__(self) -> str:
         return f"Store(url={self._url!r})"
@@ -293,6 +295,27 @@ class Store:
             pass
         if self._sent_links is not None:
             self._sent_links.add(link)
+
+    # -- analysis_only_jobs ---------------------------------------------
+
+    def is_analysis_only(self, link: str) -> bool:
+        if self._analysis_only_links is None:
+            rows = self._list_all(Collection.ANALYSIS_ONLY_JOBS, fields=_Field.LINK)
+            self._analysis_only_links = {row[_Field.LINK] for row in rows}
+        return link in self._analysis_only_links
+
+    def mark_analysis_only(self, link: str, published: str, title: str) -> None:
+        try:
+            self._request("POST", self._records(Collection.ANALYSIS_ONLY_JOBS), json={
+                _Field.LINK: link, _Field.PUBLISHED: published, _Field.TITLE: title})
+        except _NotUnique:
+            pass
+        if self._analysis_only_links is not None:
+            self._analysis_only_links.add(link)
+
+    def is_known(self, link: str) -> bool:
+        """Already handled: sent to Telegram or kept only for the analysis."""
+        return self.is_sent(link) or self.is_analysis_only(link)
 
     def sent_jobs(self) -> list[SentJob]:
         fields = f"{_Field.LINK},{_Field.PUBLISHED},{_Field.TITLE}"

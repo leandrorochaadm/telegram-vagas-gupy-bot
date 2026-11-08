@@ -162,7 +162,7 @@ def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, ignore_for
                     if reason:
                         print(f"   {reason}")
                         continue
-                    if db.is_sent(job["link"]):
+                    if db.is_known(job["link"]):
                         continue
                     sent += 1
                     send(db, job["link"], job["title"], job["company"],

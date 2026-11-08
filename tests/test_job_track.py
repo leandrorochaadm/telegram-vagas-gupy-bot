@@ -1,4 +1,4 @@
-"""Unit tests for the job track (Flutter or mobile) decided by the title.
+"""Unit tests for the job track (Flutter, mobile or back-end) decided by the title.
 
 Run: python -m unittest discover -s tests -v
 """
@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from job_track import Track, analysis_track, track_of  # noqa: E402
+from job_track import Track, analysis_track, is_sent_to_telegram, track_of  # noqa: E402
 
 
 class TrackOfTest(unittest.TestCase):
@@ -30,7 +30,32 @@ class TrackOfTest(unittest.TestCase):
         self.assertIs(analysis_track("Dev Flutter iOS"), Track.FLUTTER)
         self.assertIs(analysis_track("Dev iOS"), Track.MOBILE)
 
+    def test_backend_spellings(self):
+        for title in ("Desenvolvedor Backend Sênior", "Java Back-End Developer", "Dev Back End .Net",
+                      "BACK_END Pleno", "Dev Back\u2011end", "Dev Back\u2013end", "Pessoa Desenvolvedora BackEnd C#"):
+            self.assertIs(track_of(title), Track.BACKEND, title)
+
+    def test_backend_is_only_the_word_not_a_technology(self):
+        for title in ("Desenvolvedor Java Sênior", "Dev Node.js", "Python Developer", "Backends Ops",
+                      "Feedback Analyst", "Back office", "Backend_dev"):
+            self.assertIsNone(track_of(title), title)
+
+    def test_flutter_and_mobile_win_over_backend(self):
+        self.assertIs(track_of("Fullstack Flutter + Back-end Node"), Track.FLUTTER)
+        self.assertIs(track_of("Back-end Kotlin"), Track.MOBILE)
+        self.assertIs(track_of("Dev Mobile e Backend"), Track.MOBILE)
+
+    def test_analysis_track_of_backend(self):
+        self.assertIs(analysis_track("Dev Backend"), Track.BACKEND)
+        self.assertIs(analysis_track("Dev Backend Flutter"), Track.FLUTTER)
+
+    def test_only_backend_stays_out_of_telegram(self):
+        self.assertTrue(is_sent_to_telegram(Track.FLUTTER))
+        self.assertTrue(is_sent_to_telegram(Track.MOBILE))
+        self.assertFalse(is_sent_to_telegram(Track.BACKEND))
+
     def test_from_api(self):
+        self.assertIs(Track.from_api("backend"), Track.BACKEND)
         self.assertIs(Track.from_api("mobile"), Track.MOBILE)
         with self.assertRaises(ValueError):
             Track.from_api("Mobile")

@@ -135,7 +135,7 @@ def search_jobs(db: Store, *, filters: list[dict], user_agent: str, send: Callab
                     if blocked:
                         print(f"   {reason}")
                         continue
-                    if db.is_sent(job["link"]):
+                    if db.is_known(job["link"]):
                         continue
                     new_on_page += 1
                     send(db, job["link"], job["title"], job["company"],

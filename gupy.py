@@ -121,7 +121,7 @@ def search_jobs(db: Store, *, filters: list[dict], max_age_days: int, user_agent
                         print(f"   {reason}")
                         continue
 
-                    if db.is_sent(link):
+                    if db.is_known(link):
                         seen_in_a_row += 1
                         if seen_in_a_row >= MAX_SEEN_IN_A_ROW:
                             break

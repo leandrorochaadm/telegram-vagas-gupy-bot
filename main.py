@@ -73,6 +73,9 @@ FILTROS_GUPY = [
     {"nome": "MOBILE · REACT NATIVE · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'react native', 'limit': 15}},
     {"nome": "MOBILE · KOTLIN · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'kotlin',  'limit': 15}},
     {"nome": "MOBILE · SWIFT · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'swift',   'limit': 15}},
+    # Back-end: só a palavra, sem tecnologia. A Gupy trata "back end" igual a "back-end".
+    {"nome": "BACKEND · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'backend',  'limit': 15}},
+    {"nome": "BACKEND · BACK-END · REMOTO",  "params": {'workplaceType': 'remote', 'jobName': 'back-end', 'limit': 15}},
 ]
 
 # ProgramaThor: busca por termo + slug de localidade da URL.
@@ -88,6 +91,7 @@ FILTROS_PROGRAMATHOR = [
     {"nome": "MOBILE · REACT NATIVE · REMOTO",  "termo": "react-native", "local_filtro": "remoto"},
     {"nome": "MOBILE · KOTLIN · REMOTO",  "termo": "kotlin",  "local_filtro": "remoto"},
     {"nome": "MOBILE · SWIFT · REMOTO",  "termo": "swift",   "local_filtro": "remoto"},
+    # Não existe /jobs-backend nem /jobs-back-end no ProgramaThor (404): sem busca de back-end
 ]
 
 # LinkedIn (API guest): keywords + localização + filtros de data e modalidade.
@@ -97,6 +101,7 @@ FILTROS_LINKEDIN = [
     {"nome": "FLUTTER · REMOTO", "params": {"keywords": "flutter", "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
     # Uma busca só para mobile (o LinkedIn recusa com 429 quando há muitas): "OR" é operador do LinkedIn
     {"nome": "MOBILE · REMOTO",  "params": {"keywords": 'mobile OR android OR ios OR "react native" OR kotlin OR swift', "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
+    {"nome": "BACKEND · REMOTO",  "params": {"keywords": 'backend OR "back-end" OR "back end"', "location": "Brazil", "f_WT": "2", "f_TPR": "r259200", "start": 0}},
 ]
 PAGINAS_LINKEDIN = 5  # a API guest devolve ~10 vagas por página
 # On 429, retry after growing pauses (or Retry-After, capped at the largest one), up to a total per run.
@@ -196,6 +201,10 @@ FILTROS_INHIRE = [
     {"nome": "MOBILE · REACT NATIVE · REMOTO",  "termo": "react native"},
     {"nome": "MOBILE · KOTLIN · REMOTO",  "termo": "kotlin"},
     {"nome": "MOBILE · SWIFT · REMOTO",  "termo": "swift"},
+    # O termo é procurado no título como palavra inteira: uma grafia por filtro
+    {"nome": "BACKEND · REMOTO",  "termo": "backend"},
+    {"nome": "BACKEND · BACK-END · REMOTO",  "termo": "back-end"},
+    {"nome": "BACKEND · BACK END · REMOTO",  "termo": "back end"},
 ]
 
 # Inhire — descoberta automática de empresas. A Inhire não publica a lista de
@@ -264,12 +273,14 @@ FILTROS_SOLIDES = [
     {"nome": "MOBILE · REACT NATIVE · REMOTO",  "caminho": "remoto/react-native"},
     {"nome": "MOBILE · KOTLIN · REMOTO",  "caminho": "remoto/kotlin"},
     {"nome": "MOBILE · SWIFT · REMOTO",  "caminho": "remoto/swift"},
+    {"nome": "BACKEND · REMOTO",  "caminho": "remoto/backend"},
+    {"nome": "BACKEND · BACK-END · REMOTO",  "caminho": "remoto/back-end"},
 ]
 # Seconds to wait before retrying a Solides page that came without the job list.
 PAUSA_NOVA_TENTATIVA_SOLIDES = 5
 
 # Remotar: busca pela API pública (api.remotar.com.br). A busca também olha a
-# descrição, mas só vai para o grupo quem tiver Flutter ou mobile no título (job_track.py).
+# descrição, mas só fica quem tiver Flutter, mobile ou back-end no título (job_track.py).
 # 'modalidades': "remote" | "hybrid" | "on-site" (lista vazia = qualquer uma).
 FILTROS_REMOTAR = [
     {"nome": "FLUTTER · REMOTO", "termo": "flutter", "modalidades": ["remote"]},
@@ -279,6 +290,8 @@ FILTROS_REMOTAR = [
     {"nome": "MOBILE · REACT NATIVE · REMOTO",  "termo": "react native", "modalidades": ["remote"]},
     {"nome": "MOBILE · KOTLIN · REMOTO",  "termo": "kotlin",  "modalidades": ["remote"]},
     {"nome": "MOBILE · SWIFT · REMOTO",  "termo": "swift",   "modalidades": ["remote"]},
+    {"nome": "BACKEND · REMOTO",  "termo": "backend", "modalidades": ["remote"]},
+    {"nome": "BACKEND · BACK-END · REMOTO",  "termo": "back-end", "modalidades": ["remote"]},
 ]
 # Ignora vagas remotas de empresas de fora do Brasil (salário em dólar/euro ou marcadas como internacionais).
 IGNORAR_VAGAS_INTERNACIONAIS_REMOTAR = True
@@ -294,10 +307,12 @@ DIAS_BUSCA_GUPY    = 10   # Gupy    → padrão: 10 dias
 DIAS_BUSCA_SOLIDES = 20  # Solides → padrão: 20 dias
 DIAS_BUSCA_REMOTAR = 30  # Remotar → padrão: 30 dias
 
-# A vaga só é enviada se o título for de Flutter ou de mobile (palavra inteira,
-# case-insensitive). Os termos ficam em job_track.py: FLUTTER_TITLE_TERMS e
-# MOBILE_TITLE_TERMS. Título com "flutter" é sempre Flutter, mesmo se disser "mobile".
-# Cada grupo tem a sua análise: analyze_descriptions.py --track flutter | mobile.
+# A vaga só fica se o título for de Flutter, de mobile ou de back-end (palavra inteira,
+# case-insensitive). Os termos ficam em job_track.py: FLUTTER_TITLE_TERMS,
+# MOBILE_TITLE_TERMS e BACKEND_TITLE_PATTERN. Prioridade: Flutter > mobile > back-end
+# ("Back-end Kotlin" é mobile). Vaga de back-end não vai ao Telegram: só é guardada
+# para a análise. Cada grupo tem a sua análise:
+# analyze_descriptions.py --track flutter | mobile | backend.
 
 # Vagas dessas empresas são ignoradas em todas as fontes.
 # A comparação é parcial e case-insensitive: "hired" também bloqueia "Hired Feed".
@@ -405,10 +420,10 @@ def send_queued_jobs(db: Store):
     A job that does not reach the group stays queued for the next run.
     """
     for job in db.queued_jobs():
-        if not db.is_sent(job.link):
+        if not db.is_known(job.link):
             # Also skips the same job already sent from another site in this step
             registrar_e_enviar(db, job.link, job.title, job.company, job.published, job.message, job.source)
-        if db.is_sent(job.link):
+        if db.is_known(job.link):
             db.delete_queued(job.id)
 
 def guardar_descricao_pendente(db: Store, link, titulo, empresa, data_f, fonte: Source) -> None:
@@ -490,7 +505,25 @@ def buscar_descricoes(db: Store, agora: datetime | None = None, pausa=time.sleep
     print(f"📝 Descrições: {salvas} salvas, {encerradas} encerradas, {falhas} com falha, "
           f"{len(desistencias)} desistências.")
 
+def guardar_so_para_analise(db: Store, link, titulo, empresa, data_f, fonte: Source) -> None:
+    """Keep a job that does not go to Telegram (back-end) only for the weekly analysis.
+
+    The description comes first: if marking fails after it, the next run adds it again (no duplicate),
+    and if the description fails, the job stays unmarked and is tried again next run.
+    """
+    try:
+        guardar_descricao_pendente(db, link, titulo, empresa, data_f, fonte)
+        db.mark_analysis_only(link, data_f, titulo)
+    except StoreError as erro:
+        print(f"   ⚠️  Não guardei para a análise ({erro}): {titulo[:50]}")
+        return
+    print(f"   📊 Só para a análise: {titulo[:50]}")
+
 def registrar_e_enviar(db: Store, link, titulo, empresa, data_f, mensagem, fonte: Source):
+    track = job_track.track_of(titulo)
+    if track is not None and not job_track.is_sent_to_telegram(track):
+        guardar_so_para_analise(db, link, titulo, empresa, data_f, fonte)
+        return
     if _queue_jobs:
         queue_job(db, link, titulo, empresa, data_f, mensagem, fonte)
         return
@@ -626,7 +659,7 @@ def brave_due(db: Store, source: Source, interval_min, now=None):
 def filtros_basicos(titulo, empresa=None):
     """Retorna (bloqueada, motivo) com os filtros de perfil."""
     if not titulo_relevante(titulo):
-        return True, f"🚫 Título sem Flutter nem mobile: {titulo[:55]}"
+        return True, f"🚫 Título sem Flutter, mobile nem back-end: {titulo[:55]}"
     if empresa:
         emp = empresa.lower()
         for emp_ignorada in EMPRESAS_IGNORADAS:
@@ -755,7 +788,7 @@ def _varrer_linkedin(db, erros):
                         print(f"   {motivo}")
                         continue
 
-                    if db.is_sent(link):
+                    if db.is_known(link):
                         continue
 
                     mensagem = (
@@ -905,7 +938,7 @@ def _enviar_posts_linkedin(db, filtro, posts):
             print(f"   {motivo}")
             continue
 
-        if db.is_sent(link):
+        if db.is_known(link):
             continue
 
         resumo = texto if len(texto) <= 300 else texto[:300].rsplit(" ", 1)[0] + "…"
@@ -1007,7 +1040,7 @@ def _varrer_inhire(db, erros):
                         print(f"   {motivo}")
                         continue
                         
-                    if db.is_sent(link):
+                    if db.is_known(link):
                         continue
                         
                     local = job.get('location') or 'Não informado'
@@ -1145,7 +1178,7 @@ def _varrer_solides(db, erros):
                         print(f"   {motivo}")
                         continue
 
-                    if db.is_sent(link):
+                    if db.is_known(link):
                         continue
 
                     data_iso = vaga.get('createdAt', '')

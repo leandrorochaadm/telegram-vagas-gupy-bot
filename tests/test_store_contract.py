@@ -89,6 +89,26 @@ class StoreContractCases:
         self.db.mark_sent("https://a", "2026-01-02", "A2")
         self.assertEqual(self.row_count(Collection.SENT_JOBS), 1)
 
+    def test_analysis_only_is_known_but_not_sent(self) -> None:
+        self.assertFalse(self.db.is_known("https://a"))
+        self.db.mark_analysis_only("https://a", "2026-01-01", "Dev Backend")
+        self.assertTrue(self.db.is_analysis_only("https://a"))
+        self.assertTrue(self.db.is_known("https://a"))
+        self.assertFalse(self.db.is_sent("https://a"))
+        self.assertEqual(self.db.sent_jobs(), [])
+        self.assertFalse(self.db.is_known("https://b"))
+
+    def test_sent_job_is_known(self) -> None:
+        self.db.mark_sent("https://a", "2026-01-01", "A")
+        self.assertTrue(self.db.is_known("https://a"))
+        self.assertFalse(self.db.is_analysis_only("https://a"))
+
+    def test_analysis_only_visible_after_reopen_and_kept_once(self) -> None:
+        self.db.mark_analysis_only("https://a", "2026-01-01", "A")
+        self.db.mark_analysis_only("https://a", "2026-01-02", "A2")
+        self.assertEqual(self.row_count(Collection.ANALYSIS_ONLY_JOBS), 1)
+        self.assertTrue(self.reopen().is_known("https://a"))
+
     def test_queued_jobs_web_last_then_created(self) -> None:
         for link, source in (("A", Source.WEB), ("B", Source.GUPY),
                              ("C", Source.LINKEDIN), ("D", Source.WEB)):
@@ -512,6 +532,8 @@ class FakeStoreOnlyTest(unittest.TestCase):
             "connect": fake.connect,
             "is_sent": lambda: fake.is_sent("x"),
             "mark_sent": lambda: fake.mark_sent("x", "p", "t"),
+            "is_analysis_only": lambda: fake.is_analysis_only("x"),
+            "mark_analysis_only": lambda: fake.mark_analysis_only("x", "p", "t"),
             "queued_jobs": fake.queued_jobs,
             "pending_alerts": fake.pending_alerts,
             "set_last_alert_at": lambda: fake.set_last_alert_at(when),

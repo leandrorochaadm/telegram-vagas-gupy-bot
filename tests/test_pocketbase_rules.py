@@ -17,6 +17,7 @@ BLOCKED_CREATE_STATUSES = (400, 403)
 # One valid body per data collection; the factory takes a unique tag to avoid unique indexes.
 VALID_BODIES: dict[str, dict] = {
     "sent_jobs": {"link": "https://example.com/{tag}", "published": "2026-10-24", "title": "Title {tag}"},
+    "analysis_only_jobs": {"link": "https://example.com/{tag}", "published": "2026-10-24", "title": "Title {tag}"},
     "queued_jobs": {
         "link": "https://example.com/{tag}",
         "title": "Title {tag}",
@@ -44,6 +45,7 @@ VALID_BODIES: dict[str, dict] = {
 # Field changed by the update probe, per collection.
 UPDATE_FIELDS: dict[str, tuple[str, object]] = {
     "sent_jobs": ("title", "Changed"),
+    "analysis_only_jobs": ("title", "Changed"),
     "queued_jobs": ("title", "Changed"),
     "alerts": ("text", "Changed"),
     "alert_sends": ("sent_at", "2026-10-25 12:00:00.000Z"),
@@ -213,6 +215,7 @@ class UniqueIndexTest(PocketBaseRulesTestCase):
     def test_single_field_indexes(self) -> None:
         for collection, field in (
             ("sent_jobs", "link"),
+            ("analysis_only_jobs", "link"),
             ("brave_searches", "label"),
             ("linkedin_sessions", "cookie_hash"),
             ("inhire_tenants", "slug"),
