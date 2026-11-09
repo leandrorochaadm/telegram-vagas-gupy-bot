@@ -309,8 +309,8 @@ DIAS_BUSCA_REMOTAR = 30  # Remotar → padrão: 30 dias
 # A vaga só fica se o título for de Flutter, de mobile ou de back-end (palavra inteira,
 # case-insensitive). Os termos ficam em job_track.py: FLUTTER_TITLE_TERMS,
 # MOBILE_TITLE_TERMS e BACKEND_TITLE_PATTERN. Prioridade: Flutter > mobile > back-end
-# ("Back-end Kotlin" é mobile). Vaga de back-end não vai ao Telegram: só é guardada
-# para a análise. Cada grupo tem a sua análise:
+# ("Back-end Kotlin" é mobile). Só vaga de Flutter vai ao Telegram: mobile e back-end
+# só são guardadas para a análise. Cada grupo tem a sua análise:
 # analyze_descriptions.py --track flutter | mobile | backend.
 
 # Vagas dessas empresas são ignoradas em todas as fontes.
@@ -399,7 +399,7 @@ _queue_jobs = False
 ALERT_SENT_NOT_SAVED = "uma vaga foi enviada mas não ficou registrada: {title}. Ela pode chegar repetida uma vez."
 ALERT_DUPLICATE_NOT_SAVED = "uma vaga repetida não ficou registrada: {title}. Ela pode chegar repetida uma vez."
 ALERT_DESCRIPTION_NOT_QUEUED = "a descrição de uma vaga não vai ser guardada: {title}."
-ALERT_ANALYSIS_ONLY_NOT_SAVED = "uma vaga de back-end não foi guardada para a análise: {title}. Tento de novo na próxima rodada."
+ALERT_ANALYSIS_ONLY_NOT_SAVED = "uma vaga de mobile ou back-end não foi guardada para a análise: {title}. Tento de novo na próxima rodada."
 ALERT_BACKFILL_NOT_DONE = "Não foi possível recuperar as descrições das vagas antigas: {error}. Rode de novo."
 ALERT_DESCRIPTIONS_GAVE_UP = "Fiquei sem a descrição destas vagas depois de 3 dias tentando: {titles}."
 ALERT_DESCRIPTIONS_NOT_FETCHED = "Não foi possível buscar as descrições das vagas: {error}. Tento de novo na próxima rodada."
@@ -506,7 +506,7 @@ def buscar_descricoes(db: Store, agora: datetime | None = None, pausa=time.sleep
           f"{len(desistencias)} desistências.")
 
 def guardar_so_para_analise(db: Store, link, titulo, empresa, data_f, fonte: Source) -> None:
-    """Keep a job that does not go to Telegram (back-end) only for the weekly analysis.
+    """Keep a job that does not go to Telegram (mobile or back-end) only for the weekly analysis.
 
     The description comes first: if marking fails after it, the next run adds it again (no duplicate),
     and if the description fails, the job stays unmarked and is tried again next run.

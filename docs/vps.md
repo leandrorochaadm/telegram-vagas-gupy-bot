@@ -149,7 +149,7 @@ de cada fonte ficou `saved`.
 Toda segunda às 8h o `vagas-analysis.timer` roda a análise das descrições salvas e grava o relatório em
 `/opt/vagas-bot/app/reports/`. Às 8h30 o `vagas-analysis-mobile.timer` faz o mesmo só com as vagas de mobile
 (sem Flutter no título), em outro arquivo, e às 9h o `vagas-analysis-backend.timer` só com as de back-end (sem
-Flutter nem mobile no título). As vagas de back-end não vão ao Telegram: existem só para essa análise. Gasta crédito
+Flutter nem mobile no título). As vagas de mobile e de back-end não vão ao Telegram: existem só para essas análises. Gasta crédito
 da API do Claude.
 
 ### 1. Configurar (uma vez)

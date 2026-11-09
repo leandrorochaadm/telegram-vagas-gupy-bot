@@ -49,9 +49,9 @@ class TrackOfTest(unittest.TestCase):
         self.assertIs(analysis_track("Dev Backend"), Track.BACKEND)
         self.assertIs(analysis_track("Dev Backend Flutter"), Track.FLUTTER)
 
-    def test_only_backend_stays_out_of_telegram(self):
+    def test_only_flutter_goes_to_telegram(self):
         self.assertTrue(is_sent_to_telegram(Track.FLUTTER))
-        self.assertTrue(is_sent_to_telegram(Track.MOBILE))
+        self.assertFalse(is_sent_to_telegram(Track.MOBILE))
         self.assertFalse(is_sent_to_telegram(Track.BACKEND))
 
     def test_from_api(self):

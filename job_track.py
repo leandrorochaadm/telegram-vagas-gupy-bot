@@ -2,7 +2,7 @@
 
 Each track has its own analysis report. The priority is Flutter > Mobile > Back-end: a title with "flutter"
 is always Flutter, even when it also says "mobile" or "back-end", so no report takes another track's job.
-The bot sends Flutter and mobile jobs to Telegram; back-end jobs are only kept for the analysis.
+The bot sends only Flutter jobs to Telegram; mobile and back-end jobs are only kept for the analysis.
 """
 import re
 from enum import StrEnum
@@ -79,9 +79,9 @@ def analysis_track(title: str) -> Track:
 
 
 def is_sent_to_telegram(track: Track) -> bool:
-    """Back-end jobs are only analyzed: they never go to the Telegram group."""
+    """Mobile and back-end jobs are only analyzed: they never go to the Telegram group."""
     match track:
-        case Track.FLUTTER | Track.MOBILE:
+        case Track.FLUTTER:
             return True
-        case Track.BACKEND:
+        case Track.MOBILE | Track.BACKEND:
             return False

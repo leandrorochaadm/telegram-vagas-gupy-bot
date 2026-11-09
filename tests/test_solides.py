@@ -347,9 +347,10 @@ class BuscarVagasSolidesStoreTest(unittest.TestCase):
         self.assertIn("Dev Flutter &amp; React &lt;Pleno&gt;", self.sent[0])
         self.assertIn("A&amp;B", self.sent[0])
 
-    def test_sends_android_title_without_flutter(self):
+    def test_keeps_android_title_only_for_the_analysis(self):
         self.run_with_pages(([make_vaga(title="Desenvolvedor Android")], 1, {}))
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.db.analysis_only), 1)
 
     def test_skips_ignored_company(self):
         self.run_with_pages(([make_vaga(companyName="Jobgether")], 1, {}))

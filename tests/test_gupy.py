@@ -167,7 +167,7 @@ class SearchJobsTest(unittest.TestCase):
         self.run_with([response([api_job(name="UX Writer")]), response([])])
         self.send.assert_not_called()
 
-    def test_sends_mobile_title_without_flutter(self):
+    def test_keeps_mobile_title_for_the_send_step(self):
         self.run_with([response([api_job(name="Desenvolvedor Android Pleno")]), response([])])
         self.send.assert_called_once()
 

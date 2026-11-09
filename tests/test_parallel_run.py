@@ -513,13 +513,20 @@ class StoreModesTest(unittest.TestCase):
     def test_send_jobs_sends_each_job_once_in_queue_order(self):
         self.queue("https://gupy/1", "Dev Flutter")
         self.queue("https://linkedin/1", "Dev Flutter", source=Source.LINKEDIN)  # same job, other site
-        self.queue("https://remotar/2", "Dev Mobile", source=Source.REMOTAR)
+        self.queue("https://remotar/2", "Dev Flutter Pleno", source=Source.REMOTAR)
         _, send, telegram = self.run_main("--send-jobs")
         self.assertEqual([c.args[0] for c in telegram.call_args_list],
                          ["msg https://gupy/1", "msg https://remotar/2"])
         self.assertEqual(self.db.queued_jobs(), [])
         self.assertLessEqual({"https://gupy/1", "https://linkedin/1", "https://remotar/2"}, set(self.db.sent))
         send.assert_not_called()
+
+    def test_send_jobs_keeps_a_queued_mobile_job_only_for_the_analysis(self):
+        self.queue("https://remotar/3", "Dev Mobile", source=Source.REMOTAR)
+        _, _, telegram = self.run_main("--send-jobs")
+        telegram.assert_not_called()
+        self.assertTrue(self.db.is_analysis_only("https://remotar/3"))
+        self.assertEqual(self.db.queued_jobs(), [])
 
     def test_send_jobs_skips_a_job_already_sent(self):
         self.queue("https://a", "A")

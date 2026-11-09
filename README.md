@@ -393,7 +393,7 @@ BACKEND_TITLE_PATTERN = r"back[-\u2010\u2011\u2012\u2013\u2014_ ]?end"
 
 Back-end é só a palavra, em qualquer grafia (`backend`, `back-end`, `back end`, `back_end`): título só com "Java" ou "Node" não conta. A prioridade é Flutter > mobile > back-end: "Fullstack Flutter + Back-end" é Flutter e "Back-end Kotlin" é mobile.
 
-Flutter e mobile vão para o mesmo grupo do Telegram, com o cabeçalho do filtro (`FLUTTER · REMOTO`, `MOBILE · REMOTO`, `MOBILE · ANDROID · REMOTO`...). **Vaga de back-end não vai ao Telegram**: o bot guarda a vaga na tabela `analysis_only_jobs` (para não processá-la de novo) e busca a descrição, só para a análise. Cada grupo tem a sua análise (veja "Análise das vagas").
+Só Flutter vai para o grupo do Telegram, com o cabeçalho do filtro (`FLUTTER · REMOTO`...). **Vaga de mobile e de back-end não vai ao Telegram**: o bot guarda a vaga na tabela `analysis_only_jobs` (para não processá-la de novo) e busca a descrição, só para a análise. Cada grupo tem a sua análise (veja "Análise das vagas").
 
 ---
 

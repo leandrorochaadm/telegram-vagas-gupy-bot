@@ -120,8 +120,15 @@ class QueueOnSendTest(DescriptionTestCase):
         self.assertTrue(self.db.is_known(GUPY_LINK))
         self.telegram.assert_not_called()
 
-    def test_mobile_backend_title_is_still_sent(self):
+    def test_mobile_job_is_kept_for_analysis_without_telegram(self):
         self.send(GUPY_LINK, title="Back-end Kotlin")
+        self.telegram.assert_not_called()
+        self.assertFalse(self.db.is_sent(GUPY_LINK))
+        self.assertTrue(self.db.is_analysis_only(GUPY_LINK))
+        self.assertEqual(self.db.descriptions[GUPY_LINK].status, DescriptionStatus.PENDING)
+
+    def test_flutter_job_is_still_sent(self):
+        self.send(GUPY_LINK, title="Dev Flutter Mobile")
         self.telegram.assert_called_once()
         self.assertTrue(self.db.is_sent(GUPY_LINK))
 
