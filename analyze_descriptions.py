@@ -14,6 +14,7 @@ import argparse
 import dataclasses
 import os
 import re
+import subprocess
 import sys
 import traceback
 from collections import defaultdict
@@ -96,6 +97,7 @@ LOG_HINT = (
 MSG_MISSING_KEY = "Falta a chave da API do Claude (ANTHROPIC_API_KEY) no arquivo de configuração {path}."
 MSG_STORE = "Não foi possível ler o banco de vagas: {error}"
 MSG_RESUME = "Não foi possível ler o currículo em {path}."
+MSG_RESUME_NOT_UPDATED = "Não foi possível atualizar o currículo em {path}; a análise usa a versão que já está lá."
 MSG_ENV_FILE = "Não foi possível ler o arquivo de configuração {path}."
 MSG_UNEXPECTED = "Erro inesperado ({kind}). " + LOG_HINT
 MSG_ALL_EXTRACTIONS_FAILED = "Nenhuma vaga foi analisada porque todas as chamadas à API do Claude falharam. " + LOG_HINT
@@ -597,6 +599,26 @@ def resolve_resume_path(explicit: str | None) -> Path | None:
     return Path(from_env) if from_env else None
 
 
+GIT_PULL_TIMEOUT_SECONDS = 60
+
+
+def update_resume_repo(resume_path: Path) -> bool:
+    """Fast-forwards the git clone that holds the resume, so the analysis reads the latest version.
+
+    A failed pull (no network, local changes, not a clone) only warns: the file already on disk is still usable.
+    """
+    command = ["git", "-C", str(resume_path.parent), "pull", "--ff-only", "--quiet"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=GIT_PULL_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(MSG_RESUME_NOT_UPDATED.format(path=resume_path), error, file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(MSG_RESUME_NOT_UPDATED.format(path=resume_path), result.stderr.strip(), file=sys.stderr)
+        return False
+    return True
+
+
 def record_failure_alert(db: store.Store | None, reason: str, track: Track = Track.FLUTTER) -> None:
     text = MSG_ALERT_TEXT.format(track=track.label, reason=reason.rstrip("."))
     try:
@@ -629,6 +651,7 @@ def main(argv: Sequence[str] = ()) -> int:
     resume_path = resolve_resume_path(args.resume)
     raw: str | None = None
     if resume_path is not None:
+        update_resume_repo(resume_path)
         try:
             raw = resume_path.read_text(encoding="utf-8")
             tex_to_text(raw)

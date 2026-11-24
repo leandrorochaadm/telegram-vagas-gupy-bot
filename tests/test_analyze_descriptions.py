@@ -6,6 +6,7 @@ import contextlib
 import io
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -487,6 +488,48 @@ class LearningAndPhrasesTest(AnalyzeTestCase):
         self.assertEqual(self.extractor.count("classify_phrases"), 0)
 
 
+
+class UpdateResumeRepoTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.tmp = tmp
+
+    def git(self, *args: str, cwd: Path) -> None:
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    def make_clone(self) -> tuple[Path, Path]:
+        origin, author, clone = self.tmp / "origin.git", self.tmp / "author", self.tmp / "clone"
+        self.git("init", "--bare", "-q", str(origin), cwd=self.tmp)
+        self.git("clone", "-q", str(origin), str(author), cwd=self.tmp)
+        for key, value in (("user.name", "Test"), ("user.email", "test@example.com")):
+            self.git("config", key, value, cwd=author)
+        (author / "cv.tex").write_text("v1", encoding="utf-8")
+        self.git("add", "cv.tex", cwd=author)
+        self.git("commit", "-q", "-m", "v1", cwd=author)
+        self.git("push", "-q", "origin", "HEAD", cwd=author)
+        self.git("clone", "-q", str(origin), str(clone), cwd=self.tmp)
+        (author / "cv.tex").write_text("v2", encoding="utf-8")
+        self.git("commit", "-q", "-am", "v2", cwd=author)
+        self.git("push", "-q", "origin", "HEAD", cwd=author)
+        return author, clone
+
+    def test_pulls_latest_resume(self) -> None:
+        _, clone = self.make_clone()
+        self.assertTrue(ad.update_resume_repo(clone / "cv.tex"))
+        self.assertEqual((clone / "cv.tex").read_text(encoding="utf-8"), "v2")
+
+    def test_failed_pull_warns_and_keeps_file(self) -> None:
+        resume = self.tmp / "cv.tex"
+        resume.write_text("local", encoding="utf-8")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            updated = ad.update_resume_repo(resume)
+        self.assertFalse(updated)
+        self.assertIn(ad.MSG_RESUME_NOT_UPDATED.format(path=resume), err.getvalue())
+        self.assertEqual(resume.read_text(encoding="utf-8"), "local")
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -526,6 +569,7 @@ class MainTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.make_client = mock.patch.object(ad, "make_client", return_value=object()).start()
+        self.update_resume = mock.patch.object(ad, "update_resume_repo", return_value=True).start()
         self.addCleanup(mock.patch.stopall)
 
     def _from_env(self) -> FakeStore:
@@ -609,6 +653,18 @@ class MainTest(unittest.TestCase):
         os.environ.pop("RESUME_PATH", None)
         self.call_main()
         self.assertIsNone(self.run_calls[1]["resume_text"])
+
+    def test_resume_repo_is_updated_before_reading(self) -> None:
+        resume = self.tmp / "cv.tex"
+        resume.write_text(RESUME_TEX, encoding="utf-8")
+        self.update_resume.side_effect = lambda path: path.write_text(RESUME_TEX + "% pulled\n", encoding="utf-8")
+        self.call_main("--resume", str(resume))
+        self.update_resume.assert_called_once_with(resume)
+        self.assertEqual(self.run_calls[0]["resume_text"], RESUME_TEX + "% pulled\n")
+
+    def test_no_resume_means_no_pull(self) -> None:
+        self.call_main()
+        self.update_resume.assert_not_called()
 
     def test_resume_flag_wins_over_env(self) -> None:
         env_resume = self.tmp / "env.tex"

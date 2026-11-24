@@ -493,6 +493,8 @@ Rode da raiz do repositório. Opções:
 
 Sem `--resume`, usa o `RESUME_PATH` desse arquivo; se estiver vazio, o relatório sai sem comparação com o currículo.
 
+Antes de ler o currículo, o script roda `git pull --ff-only` na pasta do `.tex`, para comparar sempre com a versão mais nova do repositório. Se o pull falhar (sem rede, mudança local, pasta que não é clone), ele avisa e segue com o arquivo que já está lá.
+
 A chave `ANTHROPIC_API_KEY` fica no arquivo de configuração. Sem ela, o comando para antes de ler o banco.
 
 **Custo:** a API do Claude é paga por uso. O Haiku roda uma vez por vaga nova, e o Sonnet em poucas chamadas por análise (agrupar rótulos, comparar o currículo, classificar expressões). O cache em `reports/cache/` evita pagar de novo pela mesma vaga.
